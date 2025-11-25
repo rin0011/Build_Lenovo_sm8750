@@ -200,14 +200,6 @@ jobs:
             cd KernelSU
             KSU_VERSION=$(expr "$(git rev-list --count main)" + 37185 2>/dev/null || echo 114514)
             echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
-             cp "${GITHUB_WORKSPACE}/.github/workflows/tools/setup.bin" ./
-            chmod +x setup.bin
-            if [ ! -f "kernel/Makefile" ]; then
-              echo "::error ::kernel/Makefile"
-              ls -la
-              exit 1
-            fi
-            ./setup.bin
 
       - name: 🔧 Set up SUSFS (配置 SUSFS)
         env:
