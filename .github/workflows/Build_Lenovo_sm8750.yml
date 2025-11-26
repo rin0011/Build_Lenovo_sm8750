@@ -24,12 +24,6 @@ on:
         required: false
         default: ''
 
-      enable_feature_a:
-        description: "开启BBG基带守护"
-        required: false
-        default: false
-        type: boolean
-
       enable_feature_d:
         description: "使用AOSP密钥签名boot"
         required: false
@@ -182,15 +176,6 @@ jobs:
             echo "ccache缓存命中详情:"
             ccache -sv
           fi
-      - name: 🛠 Set Baseband-guard (配置BBG基带守护)
-        if: ${{inputs.enable_feature_a}}
-        run: |
-          echo "正在启用启用内核级基带保护支持…"
-          cd kernel_workspace
-          wget -O- https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh | bash
-          echo "CONFIG_BBG=y" >> ./common/arch/arm64/configs/gki_defconfig
-          sed -i '/^config LSM$/,/^help$/{ /^[[:space:]]*default/ { /baseband_guard/! s/lockdown/lockdown,baseband_guard/ } }' ./common/security/Kconfig
-
       
       - name: ⚙️ Set SuKiSU Ultra (设置SuKiSU Ultra)
         id: ksu_version

@@ -1,0 +1,399 @@
+name: Build_sukisu
+
+env:
+  gz_branch: 'heads'
+on:
+  workflow_dispatch:
+    inputs:
+      sub_level:
+        description: "📝请选择要编译的版本："
+        required: true
+        type: choice
+        options:
+          - '6.6.56'
+          - '6.6.89'
+        default: '6.6.89'
+
+      custom_kernel_suffix:
+        description: "✏️ 自定义内核名称 (留空默认官核名称)"
+        required: false
+        default: ''
+      
+      custom_kernel_time:
+        description: "⏰ 自定义构建时间 (留空默认官核时间)"
+        required: false
+        default: ''
+
+      enable_feature_d:
+        description: "使用AOSP密钥签名boot"
+        required: false
+        default: true
+        type: boolean
+
+      enable_feature_c:
+         description: "选择网络调度"
+         required: false
+         type: choice
+         options:
+            - 'FQ_CODEL'
+            - 'BBR'
+         default: 'FQ_CODEL'
+        
+      
+       
+jobs:
+  build:
+    name: Build_${{ github.event.inputs.sub_level }}
+    runs-on: ubuntu-latest
+    outputs:
+      ksuver: ${{ steps.ksu_version.outputs.ksuver }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: ⚙️ Set Kernel version config(设置对应内核版本配置文件)
+        run: |
+          echo "sub_level=${{ github.event.inputs.sub_level }}" >> $GITHUB_ENV
+          echo "KERNEL_TIME=${{ github.event.inputs.custom_kernel_time }}" >> $GITHUB_ENV
+          case "${{ github.event.inputs.sub_level }}" in
+            6.6.56)
+              echo "os_patch_level=2024-11" >> $GITHUB_ENV
+              echo "releases=TB322FC_1.1.11.120" >> $GITHUB_ENV
+              ;;
+            6.6.89)
+              echo "os_patch_level=2025-06" >> $GITHUB_ENV
+              echo "releases=TB322FC_1.1.11.263" >> $GITHUB_ENV
+              ;;
+          esac
+           if [ -z "${{ github.event.inputs.custom_kernel_suffix }}" ]; then
+            case "${{ github.event.inputs.sub_level }}" in
+              6.6.56)
+                echo 'DEFAULT_SUFFIX=-android15-8-g38447e018c92-ab12829524-4k' >> $GITHUB_ENV
+                ;;
+              6.6.89)
+                echo 'DEFAULT_SUFFIX=-android15-8-g14220ae4ce65-ab13680582-4k' >> $GITHUB_ENV
+                ;;
+            esac
+          else
+            echo "使用自定义名称: ${{ github.event.inputs.custom_kernel_suffix }}"
+            echo "DEFAULT_SUFFIX=${{ github.event.inputs.custom_kernel_suffix }}" >> $GITHUB_ENV
+          fi
+          if [ -z "${{ github.event.inputs.custom_kernel_time }}" ]; then
+            case "${{ github.event.inputs.sub_level }}" in
+              6.6.56)
+                echo 'KERNEL_TIME=Thu Dec 19 17:58:46 UTC 2024' >> $GITHUB_ENV
+                ;;
+              6.6.89)
+                echo 'KERNEL_TIME=Mon Jun 23 07:30:57 UTC 2025' >> $GITHUB_ENV
+                ;;
+            esac
+          else
+            echo "使用自定义构建时间: ${{ github.event.inputs.custom_kernel_time }}"
+            echo "KERNEL_TIME=${{ github.event.inputs.custom_kernel_time }}" >> $GITHUB_ENV
+          fi
+
+      - name: 🛠 Install dependencies and Initialize repo and sync （安装环境依赖+初始化源码仓库及工具链）
+        run: |
+          rm -rf kernel_workspace
+          mkdir kernel_workspace
+          cd kernel_workspace
+          
+          sudo apt-mark hold firefox &&
+          sudo apt-mark hold libc-bin &&
+          sudo apt purge man-db &&
+          sudo rm -rf /var/lib/man-db/auto-update &&
+          sudo apt update &&
+          sudo apt-get install -y --no-install-recommends binutils python-is-python3 libssl-dev libelf-dev ccache p7zip-full &
+          echo "正在克隆源码仓库..."
+          aria2c -s16 -x16 -k1M "https://android.googlesource.com/kernel/common/+archive/refs/${gz_branch}/android15-6.6-${os_patch_level}.tar.gz" -o common.tar.gz && \
+          mkdir -p common && \
+          tar -xzf common.tar.gz -C common && \
+          rm -f common.tar.gz &
+
+          
+          echo "正在克隆llvm-clang18工具链..." &&
+          mkdir -p clang18 &&
+          aria2c -s16 -x16 -k1M https://github.com/cctv18/oneplus_sm8650_toolchain/releases/download/LLVM-Clang18-r510928/clang-r510928.zip -o clang.zip &&
+          unzip -q clang.zip -d clang18 &&
+          rm -rf clang.zip &
+          
+          echo "正在克隆构建工具..." &&
+          aria2c -s16 -x16 -k1M https://github.com/cctv18/oneplus_sm8650_toolchain/releases/download/LLVM-Clang18-r510928/build-tools.zip -o build-tools.zip &&
+          unzip -q build-tools.zip &&
+          rm -rf build-tools.zip &
+          
+          wait
+          echo "所有源码及llvm-Clang18工具链初始化完成！"
+          echo "正在去除 ABI 保护 & 去除 dirty 后缀..."
+          rm common/android/abi_gki_protected_exports_* || true
+          for f in common/scripts/setlocalversion; do
+            sed -i 's/ -dirty//g' "$f"
+            sed -i '$i res=$(echo "$res" | sed '\''s/-dirty//g'\'')' "$f"
+          done
+
+      - name: 🛠 Set ccache DIR(配置ccache目录)
+        run: |
+          echo "CCACHE_DIR=$HOME/.ccache_${{ env.sub_level }}" >> $GITHUB_ENV
+          echo "CCACHE_MAXSIZE=3G" >> $GITHUB_ENV
+          echo "当前磁盘空间："
+          df -h
+          echo "当前构建内核版本：${{ env.sub_level }}"
+
+      - name: 📥 Restore ccache (载入当前内核版本的ccache缓存)
+        uses: actions/cache@v4
+        id: ccache-restore
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-neov2-${{ env.sub_level }}-${{ runner.os }}-main
+          restore-keys: |
+            ccache-neov2-${{ env.sub_level }}-${{ runner.os }}-
+            ccache-neov2-${{ env.sub_level }}-
+      
+      - name: 📥 Init ccache (初始化并配置ccache)
+        run: |
+          # 设置ccache环境变量
+          export CCACHE_COMPILERCHECK="none"
+          export CCACHE_BASEDIR="${{ github.workspace }}"
+          export CCACHE_NOHASHDIR="true"
+          export CCACHE_HARDLINK="true"
+          export CCACHE_DIR="${{ env.CCACHE_DIR }}"
+          export CCACHE_MAXSIZE="${{ env.CCACHE_MAXSIZE }}"
+          
+          # 确保ccache目录存在
+          mkdir -p "$CCACHE_DIR"
+          
+          # 每次运行都重新配置缓存大小
+          echo "配置ccache缓存大小为: $CCACHE_MAXSIZE"
+          ccache -M "$CCACHE_MAXSIZE"
+          ccache -o compression=true
+          
+          # 显示初始缓存状态
+          echo "ccache初始状态:"
+          ccache -s
+          
+          # 如果缓存恢复命中，显示详细信息
+          if [ "${{ steps.ccache-restore.outputs.cache-hit }}" == 'true' ]; then
+            echo "ccache缓存命中详情:"
+            ccache -sv
+          fi
+      
+      - name: ⚙️ Set SuKiSU Ultra (设置SuKiSU Ultra)
+        id: ksu_version
+        run: |
+            cd kernel_workspace
+            curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/susfs-main/kernel/setup.sh" | bash -s susfs-main
+            cd KernelSU
+            KSU_VERSION=$(expr "$(git rev-list --count main)" + 37185 2>/dev/null || echo 114514)
+            echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
+
+      - name: 🔧 Set up SUSFS (配置 SUSFS)
+        env:
+          ENABLE_B: ${{ github.event.inputs.enable_feature_b }}
+        run: |
+          cd kernel_workspace
+          echo "正在添加SukiSU Ultra补丁..."
+          git clone https://github.com/ShirkNeko/susfs4ksu.git -b gki-android15-6.6
+          git clone https://github.com/ShirkNeko/SukiSU_patch.git
+          cp ./susfs4ksu/kernel_patches/50_add_susfs_in_gki-android15-6.6.patch ./common/
+          cp ./susfs4ksu/kernel_patches/fs/* ./common/fs/
+          cp ./susfs4ksu/kernel_patches/include/linux/* ./common/include/linux/
+          cp ./SukiSU_patch/hooks/scope_min_manual_hooks_v1.6.patch ./common/
+          cp ./SukiSU_patch/69_hide_stuff.patch ./common/
+          cd ./common
+          patch -p1 < scope_min_manual_hooks_v1.6.patch || true
+          patch -p1 < 69_hide_stuff.patch || true
+
+      - name: ⚙️ apply lz4 lz4 1.10.0 & zstd 1.5.7 Patch (应用lz4 1.10.0 & zstd 1.5.7补丁)
+        run: |
+          echo "正在添加lz4 1.10.0 & zstd 1.5.7补丁…"
+          cd kernel_workspace
+          git clone https://github.com/cctv18/oppo_oplus_realme_sm8750.git
+          cp ./oppo_oplus_realme_sm8750/zram_patch/001-lz4.patch ./common/
+          cp ./oppo_oplus_realme_sm8750/zram_patch/lz4armv8.S ./common/lib
+          cp ./oppo_oplus_realme_sm8750/zram_patch/002-zstd.patch ./common/
+          cd ./common
+          case "${{ github.event.inputs.sub_level }}" in
+            6.6.56)
+              TASK_MMU_C="fs/proc/task_mmu.c"
+              if grep -q "vma = find_vma(mm, start_vaddr);" "$TASK_MMU_C"; then
+                echo "为 fs/proc/task_mmu.c 中的 vma 注入类型声明..."
+                sed -i 's/vma = find_vma(mm, start_vaddr);/struct vm_area_struct *vma = find_vma(mm, start_vaddr);/' "$TASK_MMU_C"
+              else
+                echo "未找到 vma = find_vma(mm, start_vaddr);，可能已经修过或补丁不一致，跳过"
+              fi
+              ;;
+          esac
+          git apply -p1 < 001-lz4.patch || true
+          patch -p1 < 002-zstd.patch || true
+
+          
+      - name: 🔧 Set gki_defconfig (设置编译配置)
+        env:
+          ENABLE_B: ${{ github.event.inputs.enable_feature_b }} 
+          ENABLE_C: ${{ github.event.inputs.enable_feature_c }}       
+        run: |
+          cd kernel_workspace
+          echo "CONFIG_KSU=y" >> ./common/arch/arm64/configs/gki_defconfig
+          # Add VFS configuration settings
+          echo "CONFIG_KSU_MANUAL_HOOK=y" >> ./common/arch/arm64/configs/gki_defconfig
+          echo "CONFIG_CRYPTO_LZ4=y" >> ./common/arch/arm64/configs/gki_defconfig
+          echo "CONFIG_CRYPTO_LZ4HC=y" >> ./common/arch/arm64/configs/gki_defconfig
+          echo "CONFIG_CRYPTO_LZ4KD=y" >> ./common/arch/arm64/configs/gki_defconfig
+          echo "CONFIG_CRYPTO_ZSTD=y" >> ./common/arch/arm64/configs/gki_defconfig
+          echo "CONFIG_F2FS_FS_COMPRESSION=y" >> ./common/arch/arm64/configs/gki_defconfig
+          echo "CONFIG_F2FS_FS_LZ4=y" >> ./common/arch/arm64/configs/gki_defconfig
+          echo "CONFIG_F2FS_FS_LZ4HC=y" >> ./common/arch/arm64/configs/gki_defconfig
+          echo "CONFIG_F2FS_FS_ZSTD=y" >> ./common/arch/arm64/configs/gki_defconfig
+
+          if [ "$ENABLE_C" = "BBR" ]; then
+            echo "CONFIG_TCP_CONG_ADVANCED=y" >> ./common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_TCP_CONG_BBR=y" >> ./common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_NET_SCH_FQ=y" >> ./common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_TCP_CONG_BIC=n" >> ./common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_TCP_CONG_CUBIC=n" >> ./common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_TCP_CONG_WESTWOOD=n" >> ./common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_TCP_CONG_HTCP=n" >> ./common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_DEFAULT_TCP_CONG=bbr" >> ./common/arch/arm64/configs/gki_defconfig
+          fi
+          if [ "$ENABLE_C" = "FQ_CODEL" ]; then
+            echo "CONFIG_NET_SCH_FQ_CODEL=y" >> ./common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_NET_SCH_FQ=y" >> ./common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_NET_SCH_SFQ=y" >> ./common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_NET_SCH_HTB=y" >> ./common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_NET_SCH_TBF=y" >> ./common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_NET_SCH_SFB=y" >> ./common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_NET_SCH_RED=y" >> ./common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_NET_SCH_INGRESS=y" >> ./common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_DEFAULT_FQ_CODEL=y" >> ./common/arch/arm64/configs/gki_defconfig
+            echo 'CONFIG_DEFAULT_NET_SCH="fq_codel"' >> ./common/arch/arm64/configs/gki_defconfig
+          fi
+          #Remove check_defconfig
+          sudo sed -i 's/check_defconfig//' ./common/build.config.gki
+
+      - name: 🔧 Set Kernel name (写入内核名称)
+        run: |
+          cd kernel_workspace
+          echo "自定义后缀: $DEFAULT_SUFFIX"
+          ESCAPED_SUFFIX=$(printf '%s\n' "$DEFAULT_SUFFIX" | sed 's:[\/&]:\\&:g')
+          sudo sed -i "s/-4k/$ESCAPED_SUFFIX/g" ./common/arch/arm64/configs/gki_defconfig
+          sed -i 's/${scm_version}//' ./common/scripts/setlocalversion
+          
+      - name: 🔨 Build Kernel (构建内核)
+        run: |
+          WORKDIR="$(pwd)"
+          export PATH="/usr/lib/ccache:$PATH"
+          export PATH="$WORKDIR/kernel_workspace/clang18/bin:$PATH"
+          export PATH="$WORKDIR/kernel_workspace/build-tools/bin:$PATH"
+          CLANG_DIR="$WORKDIR/kernel_workspace/clang18/bin"
+          CLANG_VERSION="$($CLANG_DIR/clang --version | head -n 1)"
+          LLD_VERSION="$($CLANG_DIR/ld.lld --version | head -n 1)"
+          echo "编译器信息:"
+          echo "Clang版本: $CLANG_VERSION"
+          echo "LLD版本: $LLD_VERSION"
+          pahole_version=$(pahole --version 2>/dev/null | head -n1); [ -z "$pahole_version" ] && echo "pahole版本：未安装" || echo "pahole版本：$pahole_version"
+          
+          export CCACHE_LOGFILE="${{ github.workspace }}/kernel_workspace/ccache.log"
+          export CCACHE_COMPILERCHECK="none"
+          export CCACHE_BASEDIR="${{ github.workspace }}"
+          export CCACHE_NOHASHDIR="true"
+          export CCACHE_HARDLINK="true"
+          export CCACHE_DIR="${{ env.CCACHE_DIR }}"
+          export CCACHE_MAXSIZE="3G"
+          echo "sloppiness = file_stat_matches,include_file_ctime,include_file_mtime,pch_defines,file_macro,time_macros" >> "$CCACHE_DIR/ccache.conf"
+          
+          cd kernel_workspace/common
+          wget https://github.com/cctv18/oppo_oplus_realme_sm8750/raw/refs/heads/main/lib/libfakestat.so
+          wget https://github.com/cctv18/oppo_oplus_realme_sm8750/raw/refs/heads/main/lib/libfaketimeMT.so
+          chmod 777 ./*.so
+          export FAKESTAT="2025-05-25 12:00:00"
+          export FAKETIME="@2025-05-25 13:00:00"
+          echo "FAKESTAT=$FAKESTAT" >> $GITHUB_ENV
+          echo "FAKETIME=$FAKETIME" >> $GITHUB_ENV
+          SO_DIR=$(pwd)
+          export PRELOAD_LIBS="$SO_DIR/libfakestat.so $SO_DIR/libfaketimeMT.so"
+          #创建 CC (编译器) 包装器
+          echo '#!/bin/bash' > cc-wrapper
+          echo 'export LD_PRELOAD="'$PRELOAD_LIBS'"' >> cc-wrapper
+          echo 'export FAKESTAT="'$FAKESTAT'"' >> cc-wrapper
+          echo 'export FAKETIME="'$FAKETIME'"' >> cc-wrapper
+          echo 'ccache clang "$@"' >> cc-wrapper
+          #创建 LD (链接器) 包装器
+          echo '#!/bin/bash' > ld-wrapper
+          echo 'export LD_PRELOAD="'$PRELOAD_LIBS'"' >> ld-wrapper
+          echo 'export FAKESTAT="'$FAKESTAT'"' >> ld-wrapper
+          echo 'export FAKETIME="'$FAKETIME'"' >> ld-wrapper
+          echo 'ld.lld "$@"' >> ld-wrapper
+          
+          # 测试时间劫持测试是否正常工作
+          echo "--- [Wrapper Test] 正在创建通用的时间劫持测试脚本 ---"
+          echo '#!/bin/bash' > test-wrapper.sh
+          echo 'export LD_PRELOAD="'$PRELOAD_LIBS'"' >> test-wrapper.sh
+          echo 'export FAKESTAT="'$FAKESTAT'"' >> test-wrapper.sh
+          echo 'export FAKETIME="'$FAKETIME'"' >> test-wrapper.sh
+          echo 'echo ">>> Wrapper 内部环境检查完毕."' >> test-wrapper.sh
+          echo 'exec "$@"' >> test-wrapper.sh # 执行所有传入的参数
+          chmod +x test-wrapper.sh
+          echo "--- [Wrapper Test] 正在测试 (date) 命令 ---"
+          ./test-wrapper.sh date
+          echo "--- [Wrapper Test] 正在测试 (stat) 命令 ---"
+          ./test-wrapper.sh stat ./Makefile
+          echo "--- [Wrapper Test] 测试完毕 ---"
+          chmod +x cc-wrapper ld-wrapper
+          echo "--- 编译前环境时间: $(LD_PRELOAD=$PRELOAD_LIBS date) ---"
+          echo "--- 编译前环境文件时间戳: ---"
+          LD_PRELOAD=$PRELOAD_LIBS stat ./Makefile
+
+          export KBUILD_BUILD_TIMESTAMP="${KERNEL_TIME}"
+          
+          #在构建内核的同时清除不必要的.NET, Android NDK, Haskell, CodeQL运行库，清理空间且不阻塞后续步骤运行
+          sudo rm -rf /usr/share/dotnet &
+          sudo rm -rf /usr/local/lib/android &
+          sudo rm -rf /opt/ghc &
+          sudo rm -rf /opt/hostedtoolcache/CodeQL &
+          make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="ccache clang" LD="ld.lld" HOSTLD=ld.lld O=out KCFLAGS+=-O2 KCFLAGS+=-Wno-error gki_defconfig &&
+          make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="$(pwd)/cc-wrapper" LD="$(pwd)/ld-wrapper" HOSTLD=ld.lld O=out KCFLAGS+=-O2 KCFLAGS+=-Wno-error Image
+          
+          # 编译后时间劫持二次校验
+          echo "--- 编译后环境时间: $(LD_PRELOAD=$PRELOAD_LIBS date) ---"
+          echo "--- 编译后环境文件时间戳: ---"
+          LD_PRELOAD=$PRELOAD_LIBS stat ./Makefile
+          echo "内核编译完成！"
+          echo "ccache状态："
+          ccache -s
+          echo "编译后空间:"
+          df -h
+          
+      - name: 📦 ReName Image  (修改镜像名)
+        run: |
+          cd kernel_workspace/common/out/arch/arm64/boot
+          cp ./Image "./kernel"
+
+      - name: 📤 Upload Image (上传 Image)
+        uses: actions/upload-artifact@v4
+        with:
+         name: kernel_image
+         path: kernel_workspace/common/out/arch/arm64/boot/kernel
+         
+      - name: 📦 Sign boot using AOSP test key (使用AOSP测试密钥签名boot)
+        if: ${{inputs.enable_feature_d}}
+        run: |
+          cd kernel_workspace
+          aria2c -s16 -x16 -k1M "https://github.com/showdo/AOSP-Testkey-BootSigner/archive/refs/heads/main.tar.gz" -o boot_avb_tool.tar.gz && \
+          mkdir -p boot_avb_tool && \
+          tar -xzf boot_avb_tool.tar.gz -C boot_avb_tool && \
+          rm -f boot_avb_tool.tar.gz && \
+          cp ./common/out/arch/arm64/boot/Image ./boot_avb_tool/AOSP-Testkey-BootSigner-main/kernel
+          cd boot_avb_tool/AOSP-Testkey-BootSigner-main && \
+          curl -L -o boot.img https://github.com/showdo/AOSP-Testkey-BootSigner/releases/download/${{ env.releases }}/boot.img
+          chmod +x ./tools/magiskboot
+          ./tools/magiskboot repack boot.img
+          rm -f ./boot.img kernel
+          mv ./new-boot.img ./boot.img
+          python3 rebuild_avb.py --chained-mode
+
+      - name: 📤 Upload Signed boot (上传已签名的 boot)
+        if: ${{inputs.enable_feature_d}}
+        uses: actions/upload-artifact@v4
+        with:
+         name: Boot_${{ env.KSUVER }}_${{ env.sub_level }}_SuKiSU_AOSP_Signed
+         path: kernel_workspace/boot_avb_tool/AOSP-Testkey-BootSigner-main/boot.img
