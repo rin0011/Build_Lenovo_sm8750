@@ -331,6 +331,7 @@ jobs:
           CONFIG_TMPFS_XATTR=y
           CONFIG_TMPFS=y
           CONFIG_TMPFS_POSIX_ACL=y
+          EOF
 
 
       - name: 🔧 Set gki_defconfig (设置编译配置)
