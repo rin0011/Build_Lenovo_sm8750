@@ -210,7 +210,6 @@ jobs:
 
       
       - name: ⚙️ Set SuKiSU Ultra (设置SuKiSU Ultra)
-        if: ${{inputs.enable_feature_b}}
         id: ksu_version
         run: |
             cd kernel_workspace
@@ -331,7 +330,6 @@ jobs:
           CONFIG_TMPFS_XATTR=y
           CONFIG_TMPFS=y
           CONFIG_TMPFS_POSIX_ACL=y
-          CONFIG_KSU=y
           EOF
 
 
@@ -374,6 +372,16 @@ jobs:
             echo "CONFIG_NET_SCH_INGRESS=y" >> ./common/arch/arm64/configs/gki_defconfig
             echo "CONFIG_DEFAULT_FQ_CODEL=y" >> ./common/arch/arm64/configs/gki_defconfig
             echo 'CONFIG_DEFAULT_NET_SCH="fq_codel"' >> ./common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_KSU=y" >> ./common/arch/arm64/configs/gki_defconfig
+            # Add VFS configuration settings
+            echo "CONFIG_CRYPTO_LZ4=y" >> ./common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_CRYPTO_LZ4HC=y" >> ./common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_CRYPTO_LZ4KD=y" >> ./common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_CRYPTO_ZSTD=y" >> ./common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_F2FS_FS_COMPRESSION=y" >> ./common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_F2FS_FS_LZ4=y" >> ./common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_F2FS_FS_LZ4HC=y" >> ./common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_F2FS_FS_ZSTD=y" >> ./common/arch/arm64/configs/gki_defconfig
           fi
           #Remove check_defconfig
           sudo sed -i 's/check_defconfig//' ./common/build.config.gki
