@@ -244,11 +244,11 @@ jobs:
           echo "Patching boot image..."
           
           # Run the patching command
-          if ./ksud boot-patch -b boot.img --magiskboot ./magiskboot --kmi android15-6.6; then
+          if bash ksud boot-patch -b boot.img --magiskboot ./magiskboot --kmi android15-6.6; then
             echo "✓ Boot image patched successfully"
           else
             echo "Patching failed, trying with --out-name parameter..."
-            ./ksud boot-patch -b boot.img --magiskboot ./magiskboot --kmi android15-6.6 --out-name kernelsu_patch.img || exit 1
+            bash ksud boot-patch -b boot.img --magiskboot ./magiskboot --kmi android15-6.6 --out-name kernelsu_patch.img || exit 1
             echo "✓ Boot image patched with --out-name"
           fi
 
