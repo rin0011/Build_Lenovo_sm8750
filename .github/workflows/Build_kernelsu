@@ -1,1 +1,111 @@
+name: Build KernelSU Boot Image
 
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Optional release tag for AOSP-Testkey-BootSigner'
+        required: false
+        type: string
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Create Kernelsu folder
+        run: |
+          mkdir -p Kernelsu
+          cd Kernelsu
+
+      - name: Download KernelSU latest releases
+        run: |
+          cd Kernelsu
+          # Download ksud-x86_64-unknown-linux-musl
+          KSUD_URL=$(curl -s "https://api.github.com/repos/tiann/KernelSU/releases/latest" | grep -oP '"browser_download_url": "\K.*ksud-x86_64-unknown-linux-musl[^"]*')
+          wget -q "$KSUD_URL" -O ksud-x86_64-unknown-linux-musl
+          chmod +x ksud-x86_64-unknown-linux-musl
+          
+          # Download android15-6.6_kernelsu.ko
+          KO_URL=$(curl -s "https://api.github.com/repos/tiann/KernelSU/releases/latest" | grep -oP '"browser_download_url": "\K.*android15-6\.6_kernelsu\.ko[^"]*')
+          wget -q "$KO_URL" -O android15-6.6_kernelsu.ko
+          
+          # Rename android15-6.6_kernelsu.ko to android15-6.6
+          mv android15-6.6_kernelsu.ko android15-6.6
+
+      - name: Download Magisk and extract magiskboot
+        run: |
+          cd Kernelsu
+          # Download latest Magisk APK
+          MAGISK_URL=$(curl -s "https://api.github.com/repos/topjohnwu/Magisk/releases/latest" | grep -oP '"browser_download_url": "\K.*\.apk[^"]*' | head -1)
+          wget -q "$MAGISK_URL" -O magisk.apk
+          
+          # Extract x86_64/magiskboot.so
+          mkdir -p magisk_extracted
+          unzip -q magisk.apk -d magisk_extracted
+          cp magisk_extracted/lib/x86_64/libmagiskboot.so magiskboot.so
+          rm -rf magisk_extracted magisk.apk
+
+      - name: Download boot.img from AOSP-Testkey-BootSigner
+        run: |
+          cd Kernelsu
+          RELEASE_TAG="${{ github.event.inputs.release_tag }}"
+          
+          if [ -z "$RELEASE_TAG" ]; then
+            # Get latest release if no tag specified
+            RELEASE_INFO=$(curl -s "https://api.github.com/repos/rin0011/AOSP-Testkey-BootSigner/releases/latest")
+          else
+            # Get specific release by tag
+            RELEASE_INFO=$(curl -s "https://api.github.com/repos/rin0011/AOSP-Testkey-BootSigner/releases/tags/$RELEASE_TAG")
+          fi
+          
+          BOOT_URL=$(echo "$RELEASE_INFO" | grep -oP '"browser_download_url": "\K.*boot\.img[^"]*')
+          wget -q "$BOOT_URL" -O boot.img
+
+      - name: Patch boot image with KernelSU
+        run: |
+          cd Kernelsu
+          ./ksud boot-patch -b boot.img --magiskboot ./magiskboot.so --kmi android15-6.6
+
+      - name: Rename patched boot image
+        run: |
+          cd Kernelsu
+          rm -f boot.img
+          mv kernelsu_patch.* boot.img
+
+      - name: Download AOSP-Testkey-BootSigner for signing
+        run: |
+          cd Kernelsu
+          git clone https://github.com/rin0011/AOSP-Testkey-BootSigner.git signer
+          cp boot.img signer/boot.img
+
+      - name: Sign boot image with AVB
+        run: |
+          cd Kernelsu/signer
+          python3 rebuild_avb.py --chained-mode
+
+      - name: Upload boot image
+        uses: actions/upload-artifact@v4
+        with:
+          name: boot-image
+          path: Kernelsu/signer/boot.img
+          retention-days: 30
+
+      - name: Create Release
+        if: success()
+        uses: softprops/action-gh-release@v1
+        with:
+          files: Kernelsu/signer/boot.img
+          tag_name: kernelsu-build-${{ github.run_number }}
+          body: |
+            KernelSU patched boot image build
+            - KernelSU version: latest
+            - Magisk version: latest
+            - Build timestamp: ${{ github.event.head_commit.timestamp }}
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
