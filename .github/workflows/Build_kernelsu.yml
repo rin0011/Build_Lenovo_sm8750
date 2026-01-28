@@ -4,12 +4,29 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: 'Release tag for AOSP-Testkey-BootSigner (e.g., TB322FC_1.5.10.063)'
+        description: '🔖选择AOSP-Testkey-BootSigner版本 (可选，不选择则自动获取最新)'
         required: false
-        type: string
+        type: choice
+        options:
+          - ''
+          - 'TB322FC_1.5.10.063'
+          - 'TB322FC_1.1.11.263'
 
 jobs:
+  fetch-tags:
+    runs-on: ubuntu-latest
+    outputs:
+      tags: ${{ steps.get-tags.outputs.tags }}
+    steps:
+      - name: Fetch available tags from AOSP-Testkey-BootSigner
+        id: get-tags
+        run: |
+          TAGS=$(curl -s "https://api.github.com/repos/rin0011/AOSP-Testkey-BootSigner/releases" | jq -r '.[].tag_name' | tr '\n' ',' | sed 's/,$//')
+          echo "tags=$TAGS" >> $GITHUB_OUTPUT
+          echo "Available tags: $TAGS"
+
   build:
+    needs: fetch-tags
     runs-on: ubuntu-latest
 
     steps:
@@ -21,6 +38,15 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y curl wget unzip git python3 python3-pip jq
           echo "✓ Dependencies installed"
+
+      - name: Display selected options
+        run: |
+          echo "=========================================="
+          echo "🔨 Build Configuration"
+          echo "=========================================="
+          echo "Release Tag: ${{ github.event.inputs.release_tag }}"
+          echo "Available Tags: ${{ needs.fetch-tags.outputs.tags }}"
+          echo "=========================================="
 
       - name: Create Kernelsu folder
         run: |
@@ -70,25 +96,16 @@ jobs:
           fi
           
           ls -lh ksud
-          ./ksud --version || echo "Note: Version check may not work in container"
           echo "✓ ksud downloaded and permissions set"
           
-          # Download android15-6.6_kernelsu.ko
-          echo "Downloading kernel module..."
-          KO_URL=$(jq -r '.assets[] | select(.name=="android15-6.6_kernelsu.ko") | .browser_download_url' release.json)
+          # Download all available android15 kernel modules
+          echo "Downloading all available android15 kernel modules..."
+          jq -r '.assets[] | select(.name | contains("android15") and contains(".ko")) | "\(.browser_download_url)|\(.name)"' release.json | while IFS='|' read -r url name; do
+            echo "Downloading: $name"
+            wget -q --show-progress "$url" -O "$name" || continue
+          done
           
-          if [ -z "$KO_URL" ] || [ "$KO_URL" == "null" ]; then
-            echo "Failed to find kernel module"
-            echo "Available assets:"
-            jq -r '.assets[].name' release.json
-            exit 1
-          fi
-          
-          echo "Downloading from: $KO_URL"
-          wget -q --show-progress "$KO_URL" -O android15-6.6_kernelsu.ko || exit 1
-          mv android15-6.6_kernelsu.ko android15-6.6
-          chmod 644 android15-6.6
-          echo "✓ Kernel module downloaded"
+          echo "✓ All kernel modules downloaded"
           
           rm -f release.json
 
@@ -151,30 +168,52 @@ jobs:
           rm -rf magisk_extracted magisk.apk magisk_release.json
           echo "✓ Magisk extracted with permissions set"
 
+      - name: Fetch AOSP-Testkey-BootSigner releases
+        id: fetch-bootloader
+        run: |
+          echo "Fetching available releases from AOSP-Testkey-BootSigner..."
+          
+          curl -s "https://api.github.com/repos/rin0011/AOSP-Testkey-BootSigner/releases" > bootloader_releases.json
+          
+          echo "Available releases:"
+          jq -r '.[].tag_name' bootloader_releases.json
+          
+          FIRST_TAG=$(jq -r '.[0].tag_name' bootloader_releases.json)
+          echo "first_tag=$FIRST_TAG" >> $GITHUB_OUTPUT
+          
+          cat bootloader_releases.json > /tmp/bootloader_releases.json
+
       - name: Download boot.img from AOSP-Testkey-BootSigner
         run: |
           cd Kernelsu
           echo "=== Downloading boot.img ==="
           
           RELEASE_TAG="${{ github.event.inputs.release_tag }}"
-          RELEASE_TAG="${RELEASE_TAG:-TB322FC_1.5.10.063}"
+          
+          # If no tag selected, use the first available
+          if [ -z "$RELEASE_TAG" ]; then
+            RELEASE_TAG=$(jq -r '.[0].tag_name' /tmp/bootloader_releases.json)
+            echo "No tag selected, using latest: $RELEASE_TAG"
+          fi
           
           echo "Using release tag: $RELEASE_TAG"
           
-          BOOT_URL="https://api.github.com/repos/rin0011/AOSP-Testkey-BootSigner/releases/tags/$RELEASE_TAG"
-          curl -s -f "$BOOT_URL" > bootloader_release.json || {
-            echo "Failed to fetch release: $RELEASE_TAG"
-            echo "Available releases:"
-            curl -s "https://api.github.com/repos/rin0011/AOSP-Testkey-BootSigner/releases" | jq -r '.[].tag_name'
-            exit 1
-          }
+          # Find the release in the cached JSON
+          RELEASE_INFO=$(jq ".[] | select(.tag_name==\"$RELEASE_TAG\")" /tmp/bootloader_releases.json)
           
-          BOOT_URL=$(jq -r '.assets[] | select(.name=="boot.img") | .browser_download_url' bootloader_release.json)
+          if [ -z "$RELEASE_INFO" ] || [ "$RELEASE_INFO" == "null" ]; then
+            echo "Release $RELEASE_TAG not found!"
+            echo "Available releases:"
+            jq -r '.[].tag_name' /tmp/bootloader_releases.json
+            exit 1
+          fi
+          
+          BOOT_URL=$(echo "$RELEASE_INFO" | jq -r '.assets[] | select(.name=="boot.img") | .browser_download_url')
           
           if [ -z "$BOOT_URL" ] || [ "$BOOT_URL" == "null" ]; then
-            echo "Failed to find boot.img"
+            echo "Failed to find boot.img in release $RELEASE_TAG"
             echo "Available assets:"
-            jq -r '.assets[].name' bootloader_release.json
+            echo "$RELEASE_INFO" | jq -r '.assets[].name'
             exit 1
           fi
           
@@ -183,14 +222,21 @@ jobs:
           chmod 644 boot.img
           echo "✓ boot.img downloaded"
           
-          rm -f bootloader_release.json
+          rm -f /tmp/bootloader_releases.json
+
+      - name: List available kernel modules
+        run: |
+          cd Kernelsu
+          echo "=== Available Kernel Modules ==="
+          ls -lh android15-*_kernelsu.ko 2>/dev/null || echo "No kernel modules found"
 
       - name: Verify all files before patching
         run: |
           cd Kernelsu
           echo "=== Verifying files ==="
           
-          for file in ksud android15-6.6 magiskboot boot.img; do
+          # Check required files
+          for file in ksud magiskboot boot.img; do
             if [ -f "$file" ]; then
               SIZE=$(ls -lh "$file" | awk '{print $5}')
               PERMS=$(ls -l "$file" | awk '{print $1}')
@@ -201,20 +247,43 @@ jobs:
             fi
           done
           
+          # Check for at least one kernel module
+          if ls android15-*_kernelsu.ko 1> /dev/null 2>&1; then
+            echo "✓ Kernel modules found:"
+            ls -lh android15-*_kernelsu.ko
+          else
+            echo "✗ No kernel modules found!"
+            exit 1
+          fi
+          
           echo ""
           echo "File types:"
           file ksud magiskboot
           
           echo ""
-          echo "All files verified and ready"
+          echo "✓ All files verified and ready"
 
       - name: Patch boot image with KernelSU
         run: |
           cd Kernelsu
           echo "=== Patching boot image ==="
           
-          echo "Running: ./ksud boot-patch -b boot.img --magiskboot ./magiskboot --kmi android15-6.6"
-          ./ksud boot-patch -b boot.img --magiskboot ./magiskboot --kmi android15-6.6 || exit 1
+          # Get the first available kernel module
+          KERNEL_MODULE=$(ls -1 android15-*_kernelsu.ko 2>/dev/null | head -1)
+          
+          if [ -z "$KERNEL_MODULE" ]; then
+            echo "ERROR: No kernel module found!"
+            exit 1
+          fi
+          
+          # Extract KMI from kernel module name (e.g., android15-6.6.116_kernelsu.ko -> android15-6.6.116)
+          KMI=$(basename "$KERNEL_MODULE" _kernelsu.ko)
+          
+          echo "Using kernel module: $KERNEL_MODULE"
+          echo "KMI: $KMI"
+          echo ""
+          echo "Running: ./ksud boot-patch -b boot.img --magiskboot ./magiskboot --kmi $KMI"
+          ./ksud boot-patch -b boot.img --magiskboot ./magiskboot --kmi "$KMI" || exit 1
           
           echo "✓ Boot image patched successfully"
 
@@ -255,7 +324,7 @@ jobs:
           cp boot.img signer/boot.img
           
           echo "Contents of signer directory:"
-          ls -la signer/
+          ls -la signer/ | head -20
           
           echo "✓ BootSigner cloned and boot.img copied"
 
@@ -325,18 +394,19 @@ jobs:
             Kernelsu/signer/boot.img.sha256
           tag_name: kernelsu-build-${{ github.run_number }}
           body: |
-            KernelSU patched and signed boot image
+            🎉 KernelSU Boot Image Build Success
             
-            Build Information:
-            - Build number: ${{ github.run_number }}
-            - Build date: ${{ github.event.head_commit.timestamp }}
-            - Commit: ${{ github.sha }}
+            📋 **Build Configuration**
+            - 🔖 Build Number: ${{ github.run_number }}
+            - 🏷️ BootLoader Tag: ${{ github.event.inputs.release_tag || 'Latest' }}
+            - 📅 Build Date: ${{ github.event.head_commit.timestamp }}
+            - 📝 Commit: ${{ github.sha }}
             
-            Build Steps Completed:
+            ✅ **Completed Build Steps**
             1. ✓ Created Kernelsu folder
             2. ✓ Downloaded KernelSU latest release
-            3. ✓ Downloaded ksud-x86_64-unknown-linux-musl and patched permissions
-            4. ✓ Downloaded android15-6.6_kernelsu.ko kernel module
+            3. ✓ Downloaded ksud-x86_64-unknown-linux-musl and set permissions
+            4. ✓ Downloaded all available android15 kernel modules
             5. ✓ Downloaded and extracted Magisk magiskboot
             6. ✓ Downloaded boot.img from AOSP-Testkey-BootSigner
             7. ✓ Patched boot image with KernelSU
@@ -344,12 +414,23 @@ jobs:
             9. ✓ Cloned AOSP-Testkey-BootSigner repository
             10. ✓ Signed boot image with AVB in chained-mode
             
-            Ready for Installation:
-            This boot.img file is ready to be flashed to your device. It includes:
-            - KernelSU kernel module (android15-6.6)
-            - Magisk boot integration
-            - AOSP test key signature in chained-mode
+            📦 **Artifacts**
+            - `boot.img` - Ready for flashing to your device
+            - `boot.img.sha256` - Checksum for verification
+            
+            🚀 **Installation Instructions**
+            1. Download the `boot.img` file from this release
+            2. Verify the SHA256 checksum
+            3. Flash to your device using fastboot: `fastboot flash boot boot.img`
+            4. Reboot your device
+            
+            ℹ️ **About This Build**
+            This boot.img has been:
+            - Patched with KernelSU (using the latest available kernel module)
+            - Integrated with Magisk boot support
+            - Signed with AOSP test keys in chained-mode AVB
+            - Ready for installation on Lenovo SM8750 devices
           draft: false
-          prerelease: true
+          prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
