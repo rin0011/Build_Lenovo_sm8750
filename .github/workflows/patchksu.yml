@@ -1,4 +1,4 @@
-name: Build KernelSU Boot Image
+name: Build KernelSU init_Boot Image
 
 on:
   workflow_dispatch:
@@ -219,7 +219,6 @@ jobs:
           fi
           
           wget -q --show-progress "$INITBOOT_URL" -O init_boot.img || exit 1
-          chmod 644 init_boot.img
           echo "✓ init_boot.img downloaded"
 
           # Download vbmeta.img
@@ -230,7 +229,6 @@ jobs:
             echo "Warning: vbmeta.img not found in release $RELEASE_TAG"
           else
             wget -q --show-progress "$VBMETA_URL" -O vbmeta.img || exit 1
-            chmod 644 vbmeta.img
             echo "✓ vbmeta.img downloaded"
           fi
           
@@ -318,13 +316,12 @@ jobs:
           
           echo "Processing init_boot.img..."
           
-          PATCHED_INITBOOT=$(ls -1 kernelsu_patch.* 2>/dev/null | head -1)
+          PATCHED_INITBOOT=$(ls -1 kernelsu_patched.* 2>/dev/null | head -1)
           
           if [ -n "$PATCHED_INITBOOT" ]; then
             echo "Found patched init_boot file: $PATCHED_INITBOOT"
             rm -f init_boot.img
             mv "$PATCHED_INITBOOT" init_boot.img
-            chmod 644 init_boot.img
             echo "✓ Patched init_boot image renamed to init_boot.img"
           else
             echo "Error: No kernelsu_patch* file found!"
