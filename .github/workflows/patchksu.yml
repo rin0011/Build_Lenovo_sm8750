@@ -3,9 +3,9 @@ name: KernelSU Patch & Sign
 on:
   workflow_dispatch:
     inputs:
-      image_tag:
-        description: 'AOSP-Testkey-BootSigner Tag (Download init_boot/vbmeta)'
-        required: false
+      release_tag:
+        description: 'Tgs'
+        required: true
         default: 'latest'
         type: string
 
@@ -26,7 +26,7 @@ jobs:
 
       - name: 1 & 2. Create Kernelsu & Download KSU Files
         run: |
-          # 1. 创建 Kernelsu 文件夹并进入 (逻辑上后续命令都在此上下文中或引用此路径)
+          # 1. 创建 Kernelsu 文件夹并进入
           mkdir -p Kernelsu
           
           # 2. 从 tiann/KernelSU 下载 ksud 和 ko 模块
@@ -34,7 +34,7 @@ jobs:
           gh release download -R tiann/KernelSU -p 'ksud-x86_64-unknown-linux-musl' -O Kernelsu/ksud
           gh release download -R tiann/KernelSU -p 'android15-6.6_kernelsu.ko' -O Kernelsu/android15-6.6_kernelsu.ko
           
-          # 重命名 ko 文件
+          # 将 android15-6.6_kernelsu.ko 重命名为 android15-6.6
           mv Kernelsu/android15-6.6_kernelsu.ko Kernelsu/android15-6.6
           
           # 赋予 ksud 执行权限
@@ -48,11 +48,10 @@ jobs:
           # 下载最新 Magisk APK
           gh release download -R topjohnwu/Magisk -p '*.apk' -O magisk.apk
           
-          # 解压 APK
+          # 解压 APK 提取 x86_64/magiskboot.so
           unzip -o magisk.apk 'lib/x86_64/libmagiskboot.so' -d magisk_extract
           
-          # 提取并复制 magiskboot.so 到 Kernelsu 文件夹，重命名为 magisk
-          # 注意：APK内的 libmagiskboot.so 即为 magiskboot 二进制文件
+          # 复制到 Kernelsu 文件夹 (并重命名为 magisk 以匹配后续命令参数)
           cp magisk_extract/lib/x86_64/libmagiskboot.so Kernelsu/magisk
           
           # 赋予执行权限
@@ -67,12 +66,14 @@ jobs:
       - name: 4. Download init_boot.img & vbmeta.img
         run: |
           echo "Downloading images from rin0011/AOSP-Testkey-BootSigner..."
+          
+          # 根据输入 input 指定 tag，若为 latest 则不加 --tag 参数
           TAG_ARG=""
-          if [ "${{ inputs.image_tag }}" != "latest" ] && [ "${{ inputs.image_tag }}" != "" ]; then
-            TAG_ARG="--tag ${{ inputs.image_tag }}"
+          if [ "${{ inputs.release_tag }}" != "latest" ]; then
+            TAG_ARG="--tag ${{ inputs.release_tag }}"
           fi
           
-          # 下载 init_boot.img 和 vbmeta.img 到当前工作目录根目录
+          # 下载 init_boot.img 和 vbmeta.img
           gh release download -R rin0011/AOSP-Testkey-BootSigner $TAG_ARG -p 'init_boot.img'
           gh release download -R rin0011/AOSP-Testkey-BootSigner $TAG_ARG -p 'vbmeta.img'
         env:
@@ -82,7 +83,7 @@ jobs:
         run: |
           cd Kernelsu
           echo "Executing ksud boot-patch..."
-          # 确保引用上一级目录的 init_boot.img，并使用当前目录下的 magisk 和 module
+          # 执行修补命令，注意路径引用
           ./ksud boot-patch -b ../init_boot.img --magiskboot ./magisk --kmi android15-6.6
 
       - name: 6. Replace init_boot.img
@@ -91,7 +92,6 @@ jobs:
           rm init_boot.img
           
           # 将生成的 kernelsu_patch.* 重命名为 init_boot.img 并移动到根目录
-          # ksud 生成的文件通常格式为 kernelsu_patch_YYYYMMDD_HHMMSS.img，使用通配符匹配
           find Kernelsu -name "kernelsu_patch*.img" -exec mv {} init_boot.img \;
           
           echo "Patched image renamed to init_boot.img"
@@ -99,10 +99,13 @@ jobs:
       - name: 7. Sign Images with AOSP-Testkey-BootSigner
         run: |
           echo "Cloning BootSigner repo..."
+          # 下载签名工具仓库
           git clone https://github.com/rin0011/AOSP-Testkey-BootSigner.git signer_tool
           
-          # 将步骤 6 的 init_boot.img 和步骤 4 的 vbmeta.img 复制到签名工具目录
+          # 将步骤 6 的 init_boot.img 复制到此
           cp init_boot.img signer_tool/
+          
+          # 为了方便最终上传，也将 vbmeta 复制进去（虽然 Python 脚本主要处理 boot 镜像）
           cp vbmeta.img signer_tool/
           
           cd signer_tool
@@ -111,10 +114,9 @@ jobs:
           pip install protobuf || true
           
           echo "Executing rebuild_avb.py..."
-          # 执行签名脚本
-          python3 rebuild_avb.py
+          python3 rebuild_avb.py --chained-mode
           
-          # 验证生成结果 (rebuild_avb.py 通常会更新当前目录下的 img 文件或生成新的)
+          # 验证生成结果
           ls -l
 
       - name: 8. Upload Artifacts
