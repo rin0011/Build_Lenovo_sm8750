@@ -74,15 +74,39 @@ jobs:
         run: |
           echo "Downloading images from rin0011/AOSP-Testkey-BootSigner..."
           
-          # 根据输入 input 指定 tag，若为 latest 则不加 --tag 参数
-          TAG_ARG=""
-          if [ "${{ inputs.release_tag }}" != "latest" ]; then
-            TAG_ARG="--tag ${{ inputs.release_tag }}"
-          fi
+          REPO_OWNER="rin0011/AOSP-Testkey-BootSigner"
+          TAG="${{ inputs.release_tag }}"
           
-          # 下载 init_boot.img 和 vbmeta.img
-          gh release download -R https://github.com/rin0011/AOSP-Testkey-BootSigner.git $TAG_ARG -p 'init_boot.img'
-          gh release download -R https://github.com/rin0011/AOSP-Testkey-BootSigner.git $TAG_ARG -p 'vbmeta.img'
+          # 尝试使用 gh release download 下载
+          echo "Attempting download from Release/Tag: $TAG via GitHub CLI..."
+          
+          TAG_ARG=""
+          if [ "$TAG" != "latest" ]; then
+            TAG_ARG="--tag $TAG"
+          fi
+
+          if gh release download -R $REPO_OWNER $TAG_ARG -p 'init_boot.img' && \
+             gh release download -R $REPO_OWNER $TAG_ARG -p 'vbmeta.img'; then
+             echo "Download via gh release successful."
+          else
+             echo "gh release failed (likely no release found). Falling back to raw file download..."
+             
+             # 如果 tag 是 latest，为了 raw URL 我们需要一个确切的分支或tag
+             # 这里假设 latest 对应 main 分支，如果是特定 tag 则使用 tag
+             if [ "$TAG" == "latest" ]; then
+                TARGET_REF="main"
+             else
+                TARGET_REF="$TAG"
+             fi
+             
+             BASE_URL="https://github.com/$REPO_OWNER/raw/$TARGET_REF"
+             echo "Downloading from: $BASE_URL"
+             
+             wget -O init_boot.img "$BASE_URL/init_boot.img" || { echo "Failed to download init_boot.img"; exit 1; }
+             wget -O vbmeta.img "$BASE_URL/vbmeta.img" || { echo "Failed to download vbmeta.img"; exit 1; }
+             
+             echo "Download via wget successful."
+          fi
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -121,7 +145,7 @@ jobs:
           pip install protobuf || true
           
           echo "Executing rebuild_avb.py..."
-          python3 rebuild_avb.py
+          python3 rebuild_avb.py --chained-mode
           
           # 验证生成结果
           ls -l
