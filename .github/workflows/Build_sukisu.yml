@@ -13,7 +13,8 @@ on:
           - '6.6.56'
           - '6.6.89'
           - '6.6.116'
-        default: '6.6.116'
+          - '6.6.A16'
+        default: '6.6.A16'
 
       custom_kernel_suffix:
         description: "✏️ 自定义内核名称 (留空默认官核名称)"
@@ -66,6 +67,10 @@ jobs:
               echo "os_patch_level=lts" >> $GITHUB_ENV
               echo "releases=TB322FC_1.1.11.263" >> $GITHUB_ENV
               ;;
+            6.6.A16)
+              echo "os_patch_level=lts" >> $GITHUB_ENV
+              echo "releases=TB322FC_1.5.10.063" >> $GITHUB_ENV
+              ;;
           esac
            if [ -z "${{ github.event.inputs.custom_kernel_suffix }}" ]; then
             case "${{ github.event.inputs.sub_level }}" in
@@ -76,6 +81,9 @@ jobs:
                 echo 'DEFAULT_SUFFIX=-android15-8-g14220ae4ce65-ab13680582-4k' >> $GITHUB_ENV
                 ;;
               6.6.116)
+                echo 'DEFAULT_SUFFIX=-android15-8-g14220ae4ce65-ab13680582-4k' >> $GITHUB_ENV
+                ;;
+              6.6.A16)
                 echo 'DEFAULT_SUFFIX=-android15-8-g14220ae4ce65-ab13680582-4k' >> $GITHUB_ENV
                 ;;
             esac
@@ -94,6 +102,8 @@ jobs:
               6.6.116)
                 echo 'KERNEL_TIME=Mon Jun 23 07:30:57 UTC 2025' >> $GITHUB_ENV
                 ;;
+              6.6.A16)
+                echo 'KERNEL_TIME=Mon Jun 23 07:30:57 UTC 2025' >> $GITHUB_ENV
             esac
           else
             echo "使用自定义构建时间: ${{ github.event.inputs.custom_kernel_time }}"
@@ -451,7 +461,7 @@ jobs:
           rm -f boot_avb_tool.tar.gz && \
           cp ./common/out/arch/arm64/boot/Image ./boot_avb_tool/AOSP-Testkey-BootSigner-main/kernel
           cd boot_avb_tool/AOSP-Testkey-BootSigner-main && \
-          curl -L -o boot.img https://github.com/showdo/AOSP-Testkey-BootSigner/releases/download/${{ env.releases }}/boot.img
+          curl -L -o boot.img https://github.com/rin0011/AOSP-Testkey-BootSigner/releases/download/${{ env.releases }}/boot.img
           chmod +x ./tools/magiskboot
           ./tools/magiskboot repack boot.img
           rm -f ./boot.img kernel
