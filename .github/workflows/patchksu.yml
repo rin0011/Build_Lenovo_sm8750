@@ -12,6 +12,9 @@ on:
           - 'TB322FC_1.5.10.063'
           - 'TB322FC_1.1.11.263'
 
+permissions:
+  contents: write
+
 jobs:
   fetch-tags:
     runs-on: ubuntu-latest
@@ -20,6 +23,8 @@ jobs:
     steps:
       - name: Fetch available tags from AOSP-Testkey-BootSigner
         id: get-tags
+        # 增加超时限制防止卡死
+        timeout-minutes: 5
         run: |
           TAGS=$(curl -s "https://api.github.com/repos/rin0011/AOSP-Testkey-BootSigner/releases" | jq -r '.[].tag_name' | tr '\n' ',' | sed 's/,$//')
           echo "tags=$TAGS" >> $GITHUB_OUTPUT
@@ -36,7 +41,10 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y curl wget unzip git python3 python3-pip jq
+          sudo apt-get install -y curl wget unzip git python3 python3-pip jq file
+          # 【修复 1】安装 Python 签名工具通常需要的库
+          pip3 install --upgrade pip
+          pip3 install protobuf cryptography
           echo "✓ Dependencies installed"
 
       - name: Display selected options
@@ -60,53 +68,23 @@ jobs:
           cd Kernelsu
           echo "=== Downloading KernelSU components ==="
           
-          # Get the latest release information
           LATEST_RELEASE_URL="https://api.github.com/repos/tiann/KernelSU/releases/latest"
-          echo "Fetching from: $LATEST_RELEASE_URL"
+          curl -s -f "$LATEST_RELEASE_URL" > release.json || { echo "Failed to download release info"; exit 1; }
           
-          curl -s -f "$LATEST_RELEASE_URL" > release.json || {
-            echo "Failed to download release info"
-            exit 1
-          }
-          
-          # Extract tag name
           TAG_NAME=$(jq -r '.tag_name' release.json 2>/dev/null || echo "unknown")
           echo "Release tag: $TAG_NAME"
           
-          # Download ksud-x86_64-unknown-linux-musl
-          echo "Downloading ksud-x86_64-unknown-linux-musl..."
+          # Download ksud
           KSUD_URL=$(jq -r '.assets[] | select(.name=="ksud-x86_64-unknown-linux-musl") | .browser_download_url' release.json)
-          
-          if [ -z "$KSUD_URL" ] || [ "$KSUD_URL" == "null" ]; then
-            echo "Failed to find ksud-x86_64-unknown-linux-musl"
-            echo "Available assets:"
-            jq -r '.assets[].name' release.json
-            exit 1
-          fi
-          
-          echo "Downloading from: $KSUD_URL"
           wget -q --show-progress "$KSUD_URL" -O ksud || exit 1
-          
-          # Make it executable with proper permissions
           chmod +x ksud
-          chmod 755 ksud
           
-          # Verify it's executable
-          if file ksud | grep -q "x86-64"; then
-            echo "✓ ksud is x86_64 binary"
-          fi
-          
-          ls -lh ksud
-          echo "✓ ksud downloaded and permissions set"
-          
-          # Download all available android15 kernel modules
-          echo "Downloading all available android15 kernel modules..."
+          # Download android15 kernel modules
+          echo "Downloading android15 kernel modules..."
           jq -r '.assets[] | select(.name | contains("android15") and contains(".ko")) | "\(.browser_download_url)|\(.name)"' release.json | while IFS='|' read -r url name; do
             echo "Downloading: $name"
-            wget -q --show-progress "$url" -O "$name" || continue
+            wget -q "$url" -O "$name" || continue
           done
-          
-          echo "✓ All kernel modules downloaded"
           
           rm -f release.json
 
@@ -116,345 +94,147 @@ jobs:
           echo "=== Downloading Magisk ==="
           
           MAGISK_URL="https://api.github.com/repos/topjohnwu/Magisk/releases/latest"
-          echo "Fetching from: $MAGISK_URL"
+          curl -s -f "$MAGISK_URL" > magisk_release.json || exit 1
           
-          curl -s -f "$MAGISK_URL" > magisk_release.json || {
-            echo "Failed to download Magisk release"
-            exit 1
-          }
-          
-          # Find Magisk APK (not debug version)
           APK_URL=$(jq -r '.assets[] | select(.name | contains(".apk") and (contains("debug") | not)) | .browser_download_url' magisk_release.json | head -1)
-          
-          if [ -z "$APK_URL" ] || [ "$APK_URL" == "null" ]; then
-            echo "Failed to find Magisk APK"
-            echo "Available assets:"
-            jq -r '.assets[].name' magisk_release.json
-            exit 1
-          fi
-          
-          echo "Downloading from: $APK_URL"
           wget -q --show-progress "$APK_URL" -O magisk.apk || exit 1
           
-          echo "Extracting magiskboot..."
           mkdir -p magisk_extracted
           unzip -q magisk.apk -d magisk_extracted || exit 1
           
-          # Find magiskboot in various locations
-          BOOT_FOUND=0
-          
+          # 优化查找逻辑，优先找 x86_64
           if [ -f "magisk_extracted/lib/x86_64/libmagiskboot.so" ]; then
             cp magisk_extracted/lib/x86_64/libmagiskboot.so magiskboot
-            echo "✓ Found libmagiskboot.so (x86_64)"
-            BOOT_FOUND=1
           elif [ -f "magisk_extracted/lib/arm64-v8a/libmagiskboot.so" ]; then
             cp magisk_extracted/lib/arm64-v8a/libmagiskboot.so magiskboot
-            echo "✓ Found libmagiskboot.so (ARM64)"
-            BOOT_FOUND=1
-          elif [ -f "magisk_extracted/assets/x86_64/magiskboot" ]; then
-            cp magisk_extracted/assets/x86_64/magiskboot magiskboot
-            echo "✓ Found magiskboot (assets)"
-            BOOT_FOUND=1
+          else
+             # 尝试直接找 magiskboot 二进制文件（旧版或不同架构）
+             find magisk_extracted -name magiskboot -type f -exec cp {} ./magiskboot \; -quit
           fi
           
-          if [ $BOOT_FOUND -eq 0 ]; then
-            echo "Failed to find magiskboot"
-            echo "Contents:"
-            find magisk_extracted -type f -name "*boot*" | head -10
+          if [ ! -f "magiskboot" ]; then
+            echo "Failed to extract magiskboot!"
             exit 1
           fi
           
           chmod +x magiskboot
-          chmod 755 magiskboot
           rm -rf magisk_extracted magisk.apk magisk_release.json
-          echo "✓ Magisk extracted with permissions set"
 
       - name: Fetch AOSP-Testkey-BootSigner releases
-        id: fetch-bootloader
         run: |
-          echo "Fetching available releases from AOSP-Testkey-BootSigner..."
-          
           curl -s "https://api.github.com/repos/rin0011/AOSP-Testkey-BootSigner/releases" > bootloader_releases.json
-          
-          echo "Available releases:"
-          jq -r '.[].tag_name' bootloader_releases.json
-          
-          FIRST_TAG=$(jq -r '.[0].tag_name' bootloader_releases.json)
-          echo "first_tag=$FIRST_TAG" >> $GITHUB_OUTPUT
-          
-          cat bootloader_releases.json > /tmp/bootloader_releases.json
+          # 缓存到 /tmp 以便后续步骤使用
+          cp bootloader_releases.json /tmp/bootloader_releases.json
 
       - name: Download init_boot.img and vbmeta.img
         run: |
           cd Kernelsu
-          echo "=== Downloading images ==="
-          
           RELEASE_TAG="${{ github.event.inputs.release_tag }}"
           
-          # If no tag selected, use the first available
           if [ -z "$RELEASE_TAG" ]; then
             RELEASE_TAG=$(jq -r '.[0].tag_name' /tmp/bootloader_releases.json)
-            echo "No tag selected, using latest: $RELEASE_TAG"
+            echo "Auto-selected latest tag: $RELEASE_TAG"
           fi
           
-          echo "Using release tag: $RELEASE_TAG"
-          
-          # Find the release in the cached JSON
           RELEASE_INFO=$(jq ".[] | select(.tag_name==\"$RELEASE_TAG\")" /tmp/bootloader_releases.json)
-          
           if [ -z "$RELEASE_INFO" ] || [ "$RELEASE_INFO" == "null" ]; then
-            echo "Release $RELEASE_TAG not found!"
-            echo "Available releases:"
-            jq -r '.[].tag_name' /tmp/bootloader_releases.json
-            exit 1
+             echo "Error: Release $RELEASE_TAG not found"; exit 1
           fi
           
-          # Download init_boot.img
-          echo "Downloading init_boot.img..."
           INITBOOT_URL=$(echo "$RELEASE_INFO" | jq -r '.assets[] | select(.name=="init_boot.img") | .browser_download_url')
-          
-          if [ -z "$INITBOOT_URL" ] || [ "$INITBOOT_URL" == "null" ]; then
-            echo "Error: init_boot.img not found in release $RELEASE_TAG"
-            exit 1
-          fi
-          
-          wget -q --show-progress "$INITBOOT_URL" -O init_boot.img || exit 1
-          echo "✓ init_boot.img downloaded"
-
-          # Download vbmeta.img
-          echo "Downloading vbmeta.img..."
           VBMETA_URL=$(echo "$RELEASE_INFO" | jq -r '.assets[] | select(.name=="vbmeta.img") | .browser_download_url')
           
-          if [ -z "$VBMETA_URL" ] || [ "$VBMETA_URL" == "null" ]; then
-            echo "Warning: vbmeta.img not found in release $RELEASE_TAG"
+          wget -q --show-progress "$INITBOOT_URL" -O init_boot.img || exit 1
+          
+          if [ ! -z "$VBMETA_URL" ] && [ "$VBMETA_URL" != "null" ]; then
+            wget -q --show-progress "$VBMETA_URL" -O vbmeta.img
           else
-            wget -q --show-progress "$VBMETA_URL" -O vbmeta.img || exit 1
-            echo "✓ vbmeta.img downloaded"
+            echo "Warning: vbmeta.img not found"
           fi
-          
-          rm -f /tmp/bootloader_releases.json
-
-      - name: List available kernel modules
-        run: |
-          cd Kernelsu
-          echo "=== Available Kernel Modules ==="
-          ls -lh android15-*_kernelsu.ko 2>/dev/null || echo "No kernel modules found"
-
-      - name: Verify all files before patching
-        run: |
-          cd Kernelsu
-          echo "=== Verifying files ==="
-          
-          # Check required files
-          for file in ksud magiskboot init_boot.img; do
-            if [ -f "$file" ]; then
-              SIZE=$(ls -lh "$file" | awk '{print $5}')
-              PERMS=$(ls -l "$file" | awk '{print $1}')
-              echo "✓ $file: $PERMS $SIZE"
-            else
-              echo "✗ $file: NOT FOUND"
-              exit 1
-            fi
-          done
-          
-          # Check vbmeta
-          if [ -f "vbmeta.img" ]; then
-            echo "✓ vbmeta.img found"
-          else
-            echo "⚠ vbmeta.img not found (proceeding without it)"
-          fi
-          
-          # Check for at least one kernel module
-          if ls android15-*_kernelsu.ko 1> /dev/null 2>&1; then
-            echo "✓ Kernel modules found:"
-            ls -lh android15-*_kernelsu.ko
-          else
-            echo "✗ No kernel modules found!"
-            exit 1
-          fi
-          
-          echo ""
-          echo "File types:"
-          file ksud magiskboot
-          
-          echo ""
-          echo "✓ All files verified and ready"
 
       - name: Patch init_boot.img with KernelSU
         run: |
           cd Kernelsu
-          
           echo "=== Patching init_boot.img ==="
           
-          # Get the first available kernel module
+          # 获取第一个可用的内核模块
           KERNEL_MODULE=$(ls -1 android15-*_kernelsu.ko 2>/dev/null | head -1)
           
           if [ -z "$KERNEL_MODULE" ]; then
-            echo "ERROR: No kernel module found!"
+            echo "ERROR: No android15 kernel module found!"
             exit 1
           fi
           
-          # Extract KMI from kernel module name
-          KMI=$(basename "$KERNEL_MODULE" _kernelsu.ko)
+          # 从文件名提取 KMI (例如: android15-5.15.110_kernelsu.ko -> 5.15.110)
+          # 注意：这里假设文件名格式固定。如果文件名包含 "android15-", 去掉前缀和后缀
+          KMI=$(basename "$KERNEL_MODULE" _kernelsu.ko | sed 's/android15-//')
           
-          echo "Using kernel module: $KERNEL_MODULE"
-          echo "KMI: $KMI"
-          echo ""
-          echo "Running: ./ksud boot-patch -b init_boot.img --magiskboot ./magiskboot --kmi $KMI"
+          echo "🎯 Selected Module: $KERNEL_MODULE"
+          echo "🎯 Detected KMI: $KMI"
+          
           ./ksud boot-patch -b init_boot.img --magiskboot ./magiskboot --kmi "$KMI" || exit 1
           
-          echo "✓ init_boot.img patched successfully"
-
-      - name: Rename patched images
-        run: |
-          cd Kernelsu
-          echo "=== Processing patched images ==="
-          
-          # List files to see what was created
-          echo "Files in directory:"
-          ls -la
-          
-          echo "Processing init_boot.img..."
-          
-          PATCHED_INITBOOT=$(ls -1 kernelsu_patched.* 2>/dev/null | head -1)
-          
-          if [ -n "$PATCHED_INITBOOT" ]; then
-            echo "Found patched init_boot file: $PATCHED_INITBOOT"
-            rm -f init_boot.img
-            mv "$PATCHED_INITBOOT" init_boot.img
-            echo "✓ Patched init_boot image renamed to init_boot.img"
+          # 重命名产物
+          PATCHED_IMG=$(ls kernelsu_patched* | head -1)
+          if [ -f "$PATCHED_IMG" ]; then
+             mv "$PATCHED_IMG" init_boot_patched.img
+             echo "✓ Success! Created init_boot_patched.img"
           else
-            echo "Error: No kernelsu_patch* file found!"
-            exit 1
+             echo "✗ Patch failed, output file not found"
+             exit 1
           fi
-
-      - name: Download AOSP-Testkey-BootSigner for signing
-        run: |
-          cd Kernelsu
-          echo "=== Cloning AOSP-Testkey-BootSigner ==="
-          
-          git clone https://github.com/rin0011/AOSP-Testkey-BootSigner.git signer || exit 1
-          
-          # Copy init_boot.img to signer directory as boot.img 
-          cp init_boot.img signer/boot.img
-          echo "✓ init_boot.img copied to signer as boot.img"
-
-          # Copy vbmeta.img if it exists
-          if [ -f "vbmeta.img" ]; then
-            cp vbmeta.img signer/vbmeta.img
-            echo "✓ vbmeta.img copied to signer"
-          fi
-          
-          echo "Contents of signer directory:"
-          ls -la signer/ | head -20
-          
-          echo "✓ BootSigner cloned and images copied"
 
       - name: Sign init_boot.img with AVB
         run: |
-          cd Kernelsu/signer
+          cd Kernelsu
+          echo "=== Setting up Signer ==="
+          git clone https://github.com/rin0011/AOSP-Testkey-BootSigner.git signer
           
-          echo "=== Signing images ==="
+          # 准备文件：signer 脚本通常默认操作名为 boot.img 的文件
+          cp init_boot_patched.img signer/boot.img
+          [ -f vbmeta.img ] && cp vbmeta.img signer/vbmeta.img
           
-          if [ ! -f "rebuild_avb.py" ]; then
-            echo "ERROR: rebuild_avb.py not found!"
-            exit 1
+          cd signer
+          
+          # 如果仓库里有 requirements.txt，安装它；否则依赖我们在 Install dependencies 步骤装的包
+          if [ -f "requirements.txt" ]; then
+            pip3 install -r requirements.txt
           fi
           
-          echo "Executing: python3 rebuild_avb.py --chained-mode"
-          # Typically rebuild_avb.py will look for boot.img (which is our init_boot) 
-          # and potentially update vbmeta.img if present and needed
-          python3 rebuild_avb.py --chained-mode || {
-            echo "Signing with --chained-mode failed, trying without..."
-            python3 rebuild_avb.py || exit 1
-          }
+          echo "=== Signing (Chained Mode) ==="
+          # 尝试签名
+          python3 rebuild_avb.py --chained-mode || python3 rebuild_avb.py || exit 1
           
-          # Rename the signed 'boot.img' back to 'init_boot.img'
-          mv boot.img init_boot.img
-          
-          echo "✓ init_boot.img signed"
-
-      - name: Verify signed images
-        run: |
-          cd Kernelsu/signer
-          echo "=== Final verification ==="
-          
-          if [ ! -f "init_boot.img" ]; then
-            echo "ERROR: Signed init_boot.img not found!"
-            exit 1
-          fi
-          
-          echo "Init boot image details:"
-          ls -lh init_boot.img
-          file init_boot.img
-          sha256sum init_boot.img > init_boot.img.sha256
-          cat init_boot.img.sha256
-          
-          if [ -f "vbmeta.img" ]; then
-            echo ""
-            echo "vbmeta image details:"
-            ls -lh vbmeta.img
-            file vbmeta.img
-            sha256sum vbmeta.img > vbmeta.img.sha256
-            cat vbmeta.img.sha256
-          fi
-          
-          echo ""
-          echo "✓ Signed images ready for flashing"
+          # 将签名后的 boot.img 重命名回 init_boot.img 以便发布
+          mv boot.img ../init_boot.img
+          echo "✓ Signed successfully"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: kernelsu-init-boot-image
           path: |
-            Kernelsu/signer/*.img
-            Kernelsu/signer/*.sha256
-          retention-days: 30
-          if-no-files-found: warn
+            Kernelsu/init_boot.img
+            Kernelsu/vbmeta.img
 
       - name: Create Release
         if: success()
         uses: softprops/action-gh-release@v1
         with:
           files: |
-            Kernelsu/signer/*.img
-            Kernelsu/signer/*.sha256
+            Kernelsu/init_boot.img
+            Kernelsu/vbmeta.img
           tag_name: kernelsu-build-${{ github.run_number }}
           body: |
-            🎉 KernelSU Init Boot & VBMeta Build Success
+            🎉 **KernelSU Build Success**
+            - **Tag:** ${{ github.event.inputs.release_tag || 'Latest' }}
+            - **KernelSU:** Latest Release
             
-            📋 **Build Configuration**
-            - 🔖 Build Number: ${{ github.run_number }}
-            - 🏷️ BootLoader Tag: ${{ github.event.inputs.release_tag || 'Latest' }}
-            - 📅 Build Date: ${{ github.event.head_commit.timestamp }}
-            - 📝 Commit: ${{ github.sha }}
-            
-            ✅ **Completed Build Steps**
-            1. ✓ Downloaded KernelSU latest release
-            2. ✓ Downloaded android15 kernel modules
-            3. ✓ Downloaded init_boot.img & vbmeta.img
-            4. ✓ Patched init_boot.img with KernelSU
-            5. ✓ Signed init_boot.img with AVB (using AOSP Test Key)
-            
-            📦 **Artifacts**
-            - `init_boot.img` - Patched and signed init boot image
-            - `vbmeta.img` - Verified Boot Metadata (Flash this if needed for AVB)
-            - Checksums (*.sha256)
-            
-            🚀 **Installation Instructions**
-            
+            **How to use:**
             ```bash
             fastboot flash init_boot init_boot.img
             fastboot flash vbmeta vbmeta.img
             fastboot reboot
             ```
-            
-            ℹ️ **About This Build**
-            This build includes:
-            - ✓ init_boot.img patched with KernelSU
-            - ✓ Signed with AOSP test keys in chained-mode AVB
-            - ✓ Matching vbmeta.img included
-          draft: false
-          prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
