@@ -1,13 +1,16 @@
-name: KernelSU Patch & Sign Workflow
+name: KernelSU Patch
 
 on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'AOSP-Testkey-BootSigner Release Tag (e.g., v1.0)'
-        required: true
-        type: string
-        default: 'latest'
+        description: '选择tags'
+        required: false
+        type: choice
+        options:
+          - ''
+          - 'TB322FC_1.5.10.063'
+          - 'TB322FC_1.1.11.263'
 
 jobs:
   patch-and-sign:
@@ -87,6 +90,7 @@ jobs:
       run: |
         git clone https://github.com/rin0011/AOSP-Testkey-BootSigner.git signer_temp
         cp init_boot.img signer_temp/
+        cp vbmeta.img signer_temp/
         
         cd signer_temp
         echo "Running rebuild_avb.py..."
