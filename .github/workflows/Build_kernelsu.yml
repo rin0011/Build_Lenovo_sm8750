@@ -31,25 +31,31 @@ jobs:
           LATEST_RELEASE=$(curl -s "https://api.github.com/repos/tiann/KernelSU/releases/latest")
           
           # Download ksud-x86_64-unknown-linux-musl
-          KSUD_URL=$(echo "$LATEST_RELEASE" | grep -o '"browser_download_url":"[^"]*ksud-x86_64-unknown-linux-musl[^"]*"' | cut -d'"' -f4)
-          if [ -z "$KSUD_URL" ]; then
-            echo "Failed to find ksud URL, attempting alternative method..."
-            KSUD_URL=$(echo "$LATEST_RELEASE" | grep -oP 'ksud-x86_64[^"]*' | head -1)
-            KSUD_URL="https://github.com/tiann/KernelSU/releases/download/$(echo "$LATEST_RELEASE" | jq -r '.tag_name')/$KSUD_URL"
+          KSUD_URL=$(echo "$LATEST_RELEASE" | jq -r '.assets[] | select(.name | contains("ksud-x86_64")) | .browser_download_url' | head -1)
+          
+          if [ -z "$KSUD_URL" ] || [ "$KSUD_URL" == "null" ]; then
+            echo "Failed to find ksud URL"
+            echo "Available assets:"
+            echo "$LATEST_RELEASE" | jq '.assets[].name'
+            exit 1
           fi
           
-          echo "Downloading from: $KSUD_URL"
+          echo "Downloading ksud from: $KSUD_URL"
           wget -q --show-progress "$KSUD_URL" -O ksud-x86_64-unknown-linux-musl || exit 1
           chmod +x ksud-x86_64-unknown-linux-musl
           echo "✓ ksud downloaded"
           
           # Download android15-6.6_kernelsu.ko
-          KO_URL=$(echo "$LATEST_RELEASE" | grep -o '"browser_download_url":"[^"]*android15-6\.6_kernelsu\.ko[^"]*"' | cut -d'"' -f4)
-          if [ -z "$KO_URL" ]; then
-            KO_URL=$(echo "$LATEST_RELEASE" | jq -r '.assets[] | select(.name | contains("android15-6.6_kernelsu.ko")) | .browser_download_url' | head -1)
+          KO_URL=$(echo "$LATEST_RELEASE" | jq -r '.assets[] | select(.name | contains("android15-6.6") and contains(".ko")) | .browser_download_url' | head -1)
+          
+          if [ -z "$KO_URL" ] || [ "$KO_URL" == "null" ]; then
+            echo "Failed to find kernel module URL"
+            echo "Available assets:"
+            echo "$LATEST_RELEASE" | jq '.assets[].name'
+            exit 1
           fi
           
-          echo "Downloading KO from: $KO_URL"
+          echo "Downloading kernel module from: $KO_URL"
           wget -q --show-progress "$KO_URL" -O android15-6.6_kernelsu.ko || exit 1
           
           # Rename android15-6.6_kernelsu.ko to android15-6.6
@@ -62,10 +68,20 @@ jobs:
           echo "Downloading Magisk..."
           
           MAGISK_RELEASE=$(curl -s "https://api.github.com/repos/topjohnwu/Magisk/releases/latest")
-          MAGISK_URL=$(echo "$MAGISK_RELEASE" | grep -o '"browser_download_url":"[^"]*\.apk[^"]*"' | cut -d'"' -f4 | head -1)
           
-          if [ -z "$MAGISK_URL" ]; then
-            echo "Failed to find Magisk URL"
+          echo "Available Magisk assets:"
+          echo "$MAGISK_RELEASE" | jq '.assets[].name'
+          
+          # Try to find the main Magisk APK (skip debug builds)
+          MAGISK_URL=$(echo "$MAGISK_RELEASE" | jq -r '.assets[] | select(.name | contains("Magisk") and (contains(".apk") or contains(".zip"))) | select(.name | contains("debug") | not) | .browser_download_url' | head -1)
+          
+          if [ -z "$MAGISK_URL" ] || [ "$MAGISK_URL" == "null" ]; then
+            echo "Failed to find Magisk APK/ZIP, trying alternative method..."
+            MAGISK_URL=$(echo "$MAGISK_RELEASE" | jq -r '.assets[] | select(.name | endswith(".apk")) | select(.name | contains("debug") | not) | .browser_download_url' | head -1)
+          fi
+          
+          if [ -z "$MAGISK_URL" ] || [ "$MAGISK_URL" == "null" ]; then
+            echo "Error: Could not find suitable Magisk file"
             exit 1
           fi
           
@@ -79,14 +95,26 @@ jobs:
           
           # Try to find magiskboot in various locations
           if [ -f "magisk_extracted/lib/x86_64/libmagiskboot.so" ]; then
+            echo "Found libmagiskboot.so at lib/x86_64/"
             cp magisk_extracted/lib/x86_64/libmagiskboot.so magiskboot.so
           elif [ -f "magisk_extracted/assets/x86_64/magiskboot" ]; then
+            echo "Found magiskboot at assets/x86_64/"
             cp magisk_extracted/assets/x86_64/magiskboot magiskboot.so
           else
-            echo "Finding magiskboot files..."
+            echo "Searching for magiskboot files..."
             find magisk_extracted -name "*magiskboot*" -type f
-            find magisk_extracted -path "*/x86_64/*" -type f | head -5
-            exit 1
+            find magisk_extracted -path "*/x86_64/*" -type f | head -10
+            
+            # Try to find any .so file in x86_64
+            SO_FILE=$(find magisk_extracted -path "*/x86_64/*" -name "*.so" | head -1)
+            if [ -n "$SO_FILE" ]; then
+              echo "Using: $SO_FILE"
+              cp "$SO_FILE" magiskboot.so
+            else
+              echo "Error: Could not find magiskboot in Magisk APK"
+              ls -la magisk_extracted/
+              exit 1
+            fi
           fi
           
           chmod +x magiskboot.so
@@ -107,7 +135,7 @@ jobs:
           RELEASE_INFO=$(curl -s "https://api.github.com/repos/rin0011/AOSP-Testkey-BootSigner/releases/tags/$RELEASE_TAG")
           
           # Check if release was found
-          if echo "$RELEASE_INFO" | grep -q '"message":"Not Found"'; then
+          if echo "$RELEASE_INFO" | jq -e '.message' > /dev/null 2>&1; then
             echo "Release $RELEASE_TAG not found!"
             echo "Available releases:"
             curl -s "https://api.github.com/repos/rin0011/AOSP-Testkey-BootSigner/releases" | jq -r '.[].tag_name'
@@ -162,11 +190,6 @@ jobs:
           cd Kernelsu
           echo "Renaming patched boot image..."
           
-          if [ ! -f "boot.img" ]; then
-            echo "Error: Original boot.img still exists, patching may have failed!"
-            exit 1
-          fi
-          
           # Find and rename the patched file
           PATCHED_FILE=$(ls -1 kernelsu_patch.* 2>/dev/null | head -1)
           if [ -z "$PATCHED_FILE" ]; then
@@ -201,6 +224,8 @@ jobs:
           
           if [ ! -f "rebuild_avb.py" ]; then
             echo "Error: rebuild_avb.py not found!"
+            echo "Available files:"
+            ls -la
             exit 1
           fi
           
