@@ -1,0 +1,126 @@
+name: KernelSU Patch & Sign
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: 'AOSP-Testkey-BootSigner Tag (Download init_boot/vbmeta)'
+        required: false
+        default: 'latest'
+        type: string
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout (Optional)
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: 1 & 2. Create Kernelsu & Download KSU Files
+        run: |
+          # 1. 创建 Kernelsu 文件夹并进入 (逻辑上后续命令都在此上下文中或引用此路径)
+          mkdir -p Kernelsu
+          
+          # 2. 从 tiann/KernelSU 下载 ksud 和 ko 模块
+          echo "Downloading KernelSU files..."
+          gh release download -R tiann/KernelSU -p 'ksud-x86_64-unknown-linux-musl' -O Kernelsu/ksud
+          gh release download -R tiann/KernelSU -p 'android15-6.6_kernelsu.ko' -O Kernelsu/android15-6.6_kernelsu.ko
+          
+          # 重命名 ko 文件
+          mv Kernelsu/android15-6.6_kernelsu.ko Kernelsu/android15-6.6
+          
+          # 赋予 ksud 执行权限
+          chmod +x Kernelsu/ksud
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 3. Download Magisk & Extract Tools
+        run: |
+          echo "Downloading Latest Magisk..."
+          # 下载最新 Magisk APK
+          gh release download -R topjohnwu/Magisk -p '*.apk' -O magisk.apk
+          
+          # 解压 APK
+          unzip -o magisk.apk 'lib/x86_64/libmagiskboot.so' -d magisk_extract
+          
+          # 提取并复制 magiskboot.so 到 Kernelsu 文件夹，重命名为 magisk
+          # 注意：APK内的 libmagiskboot.so 即为 magiskboot 二进制文件
+          cp magisk_extract/lib/x86_64/libmagiskboot.so Kernelsu/magisk
+          
+          # 赋予执行权限
+          chmod +x Kernelsu/magisk
+          
+          # 清理临时文件
+          rm magisk.apk
+          rm -rf magisk_extract
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 4. Download init_boot.img & vbmeta.img
+        run: |
+          echo "Downloading images from rin0011/AOSP-Testkey-BootSigner..."
+          TAG_ARG=""
+          if [ "${{ inputs.image_tag }}" != "latest" ] && [ "${{ inputs.image_tag }}" != "" ]; then
+            TAG_ARG="--tag ${{ inputs.image_tag }}"
+          fi
+          
+          # 下载 init_boot.img 和 vbmeta.img 到当前工作目录根目录
+          gh release download -R rin0011/AOSP-Testkey-BootSigner $TAG_ARG -p 'init_boot.img'
+          gh release download -R rin0011/AOSP-Testkey-BootSigner $TAG_ARG -p 'vbmeta.img'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 5. Execute ksud boot-patch
+        run: |
+          cd Kernelsu
+          echo "Executing ksud boot-patch..."
+          # 确保引用上一级目录的 init_boot.img，并使用当前目录下的 magisk 和 module
+          ./ksud boot-patch -b ../init_boot.img --magiskboot ./magisk --kmi android15-6.6
+
+      - name: 6. Replace init_boot.img
+        run: |
+          # 删除原始 init_boot.img
+          rm init_boot.img
+          
+          # 将生成的 kernelsu_patch.* 重命名为 init_boot.img 并移动到根目录
+          # ksud 生成的文件通常格式为 kernelsu_patch_YYYYMMDD_HHMMSS.img，使用通配符匹配
+          find Kernelsu -name "kernelsu_patch*.img" -exec mv {} init_boot.img \;
+          
+          echo "Patched image renamed to init_boot.img"
+
+      - name: 7. Sign Images with AOSP-Testkey-BootSigner
+        run: |
+          echo "Cloning BootSigner repo..."
+          git clone https://github.com/rin0011/AOSP-Testkey-BootSigner.git signer_tool
+          
+          # 将步骤 6 的 init_boot.img 和步骤 4 的 vbmeta.img 复制到签名工具目录
+          cp init_boot.img signer_tool/
+          cp vbmeta.img signer_tool/
+          
+          cd signer_tool
+          
+          echo "Installing python dependencies if needed..."
+          pip install protobuf || true
+          
+          echo "Executing rebuild_avb.py..."
+          # 执行签名脚本
+          python3 rebuild_avb.py
+          
+          # 验证生成结果 (rebuild_avb.py 通常会更新当前目录下的 img 文件或生成新的)
+          ls -l
+
+      - name: 8. Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: Patched-Signed-Images
+          path: |
+            signer_tool/init_boot.img
+            signer_tool/vbmeta.img
