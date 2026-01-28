@@ -7,14 +7,30 @@ on:
         description: 'Release tag for AOSP-Testkey-BootSigner (e.g., TB322FC_1.5.10.063)'
         required: false
         type: string
+      runner_type:
+        description: 'Select runner type'
+        required: false
+        default: 'linux'
+        type: choice
+        options:
+          - linux
+          - android
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    container:
+      image: ubuntu:22.04
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          apt-get update
+          apt-get install -y curl wget unzip git python3 python3-pip jq
+          echo "Dependencies installed"
 
       - name: Create Kernelsu folder
         run: |
@@ -30,8 +46,8 @@ jobs:
           # Get the latest release information
           LATEST_RELEASE=$(curl -s "https://api.github.com/repos/tiann/KernelSU/releases/latest")
           
-          # Download ksud-x86_64-unknown-linux-musl
-          KSUD_URL=$(echo "$LATEST_RELEASE" | jq -r '.assets[] | select(.name | contains("ksud-x86_64")) | .browser_download_url' | head -1)
+          # Download ksud-aarch64-unknown-linux-musl (suitable for Android)
+          KSUD_URL=$(echo "$LATEST_RELEASE" | jq -r '.assets[] | select(.name=="ksud-aarch64-unknown-linux-musl") | .browser_download_url')
           
           if [ -z "$KSUD_URL" ] || [ "$KSUD_URL" == "null" ]; then
             echo "Failed to find ksud URL"
@@ -41,12 +57,12 @@ jobs:
           fi
           
           echo "Downloading ksud from: $KSUD_URL"
-          wget -q --show-progress "$KSUD_URL" -O ksud-x86_64-unknown-linux-musl || exit 1
-          chmod +x ksud-x86_64-unknown-linux-musl
+          wget -q --show-progress "$KSUD_URL" -O ksud || exit 1
+          chmod +x ksud
           echo "✓ ksud downloaded"
           
           # Download android15-6.6_kernelsu.ko
-          KO_URL=$(echo "$LATEST_RELEASE" | jq -r '.assets[] | select(.name | contains("android15-6.6") and contains(".ko")) | .browser_download_url' | head -1)
+          KO_URL=$(echo "$LATEST_RELEASE" | jq -r '.assets[] | select(.name=="android15-6.6_kernelsu.ko") | .browser_download_url')
           
           if [ -z "$KO_URL" ] || [ "$KO_URL" == "null" ]; then
             echo "Failed to find kernel module URL"
@@ -72,7 +88,7 @@ jobs:
           echo "Available Magisk assets:"
           echo "$MAGISK_RELEASE" | jq '.assets[].name'
           
-          # Try to find the main Magisk APK (skip debug builds)
+          # Find the main Magisk APK (skip debug builds)
           MAGISK_URL=$(echo "$MAGISK_RELEASE" | jq -r '.assets[] | select(.name | contains("Magisk") and (contains(".apk") or contains(".zip"))) | select(.name | contains("debug") | not) | .browser_download_url' | head -1)
           
           if [ -z "$MAGISK_URL" ] || [ "$MAGISK_URL" == "null" ]; then
@@ -91,25 +107,28 @@ jobs:
           # Extract x86_64/magiskboot
           echo "Extracting magiskboot..."
           mkdir -p magisk_extracted
-          unzip -q magisk.apk -d magisk_extracted
+          unzip -q magisk.apk -d magisk_extracted || unzip -q magisk.apk -d magisk_extracted
           
           # Try to find magiskboot in various locations
           if [ -f "magisk_extracted/lib/x86_64/libmagiskboot.so" ]; then
             echo "Found libmagiskboot.so at lib/x86_64/"
-            cp magisk_extracted/lib/x86_64/libmagiskboot.so magiskboot.so
+            cp magisk_extracted/lib/x86_64/libmagiskboot.so magiskboot
           elif [ -f "magisk_extracted/assets/x86_64/magiskboot" ]; then
             echo "Found magiskboot at assets/x86_64/"
-            cp magisk_extracted/assets/x86_64/magiskboot magiskboot.so
+            cp magisk_extracted/assets/x86_64/magiskboot magiskboot
+          elif [ -f "magisk_extracted/lib/arm64-v8a/libmagiskboot.so" ]; then
+            echo "Found libmagiskboot.so at lib/arm64-v8a/"
+            cp magisk_extracted/lib/arm64-v8a/libmagiskboot.so magiskboot
           else
             echo "Searching for magiskboot files..."
             find magisk_extracted -name "*magiskboot*" -type f
-            find magisk_extracted -path "*/x86_64/*" -type f | head -10
+            find magisk_extracted -path "*/lib/*" -name "*.so" | head -10
             
-            # Try to find any .so file in x86_64
-            SO_FILE=$(find magisk_extracted -path "*/x86_64/*" -name "*.so" | head -1)
+            # Try to find any .so file
+            SO_FILE=$(find magisk_extracted -name "*.so" | grep -E "(magisk|boot)" | head -1)
             if [ -n "$SO_FILE" ]; then
               echo "Using: $SO_FILE"
-              cp "$SO_FILE" magiskboot.so
+              cp "$SO_FILE" magiskboot
             else
               echo "Error: Could not find magiskboot in Magisk APK"
               ls -la magisk_extracted/
@@ -117,7 +136,7 @@ jobs:
             fi
           fi
           
-          chmod +x magiskboot.so
+          chmod +x magiskboot
           rm -rf magisk_extracted magisk.apk
           echo "✓ Magisk extracted"
 
@@ -166,7 +185,7 @@ jobs:
             exit 1
           fi
           
-          if [ ! -f "ksud-x86_64-unknown-linux-musl" ]; then
+          if [ ! -f "ksud" ]; then
             echo "Error: ksud not found!"
             exit 1
           fi
@@ -176,13 +195,20 @@ jobs:
             exit 1
           fi
           
-          if [ ! -f "magiskboot.so" ]; then
+          if [ ! -f "magiskboot" ]; then
             echo "Error: magiskboot not found!"
             exit 1
           fi
           
-          # Run the patching command
-          ./ksud-x86_64-unknown-linux-musl boot-patch -b boot.img --magiskboot ./magiskboot.so --kmi android15-6.6 || exit 1
+          # Check if ksud is executable
+          file ksud
+          
+          # Run the patching command with proper parameters
+          ./ksud boot-patch -b boot.img --magiskboot ./magiskboot --kmi android15-6.6 --out-name kernelsu_patch.img || {
+            echo "Trying alternative parameters..."
+            ./ksud boot-patch -b boot.img --magiskboot ./magiskboot --kmi android15-6.6 || exit 1
+          }
+          
           echo "✓ Boot image patched"
 
       - name: Rename patched boot image
@@ -191,9 +217,10 @@ jobs:
           echo "Renaming patched boot image..."
           
           # Find and rename the patched file
-          PATCHED_FILE=$(ls -1 kernelsu_patch.* 2>/dev/null | head -1)
+          PATCHED_FILE=$(ls -1 kernelsu_patch* 2>/dev/null | head -1)
           if [ -z "$PATCHED_FILE" ]; then
-            echo "Error: No patched boot image found (kernelsu_patch.*)"
+            echo "Error: No patched boot image found (kernelsu_patch*)"
+            echo "Available files:"
             ls -la
             exit 1
           fi
@@ -229,6 +256,7 @@ jobs:
             exit 1
           fi
           
+          # Install Python dependencies if needed
           python3 rebuild_avb.py --chained-mode || exit 1
           echo "✓ Boot image signed"
 
@@ -243,6 +271,9 @@ jobs:
           
           ls -lh boot.img
           echo "✓ Signed boot image ready"
+          
+          # Calculate checksum
+          sha256sum boot.img
 
       - name: Upload boot image artifact
         uses: actions/upload-artifact@v4
@@ -263,6 +294,8 @@ jobs:
             - Build number: ${{ github.run_number }}
             - Timestamp: ${{ github.event.head_commit.timestamp }}
             - Commit: ${{ github.sha }}
+            
+            This boot.img has been patched with KernelSU and signed with AOSP test keys in chained-mode.
           draft: false
           prerelease: true
         env:
