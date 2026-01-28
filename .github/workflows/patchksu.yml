@@ -36,20 +36,15 @@ jobs:
         
         echo "KernelSU files downloaded."
 
-    # 步骤 3: 下载并提取 Magiskboot
-    - name: Setup Magiskboot
+    # 步骤 3 (已修改): 从 AOSP-Testkey-BootSigner 获取 magiskboot
+    - name: Download Magiskboot Tool
       run: |
-        echo "Downloading Magisk..."
-        wget -O Magisk.apk "https://github.com/topjohnwu/Magisk/releases/latest/download/Magisk.apk"
+        echo "Downloading magiskboot from rin0011 tools..."
+        # 直接使用 raw.githubusercontent.com 下载 master 分支下的 tools/magiskboot
+        # 并将其保存为 magiskboot.so 以匹配后续 Step 5 的参数要求
+        wget -O Kernelsu/magiskboot.so "https://raw.githubusercontent.com/rin0011/AOSP-Testkey-BootSigner/master/tools/magiskboot"
         
-        echo "Extracting magiskboot..."
-        # 注意：Magisk APK 中 magiskboot 通常位于 lib/x86_64/libmagiskboot.so
-        # 我们使用 unzip -j (junk paths) 直接提取文件而不保留目录结构
-        unzip -j Magisk.apk "lib/x86_64/libmagiskboot.so" -d Kernelsu/
-        
-        # 重命名为 magiskboot.so 以匹配你的指令
-        mv Kernelsu/libmagiskboot.so Kernelsu/magiskboot.so
-        echo "Magiskboot setup complete."
+        echo "Magiskboot downloaded successfully."
 
     # 步骤 4: 下载指定 Tag 的镜像文件
     - name: Download Images
@@ -57,7 +52,6 @@ jobs:
         TAG_NAME: ${{ inputs.tag }}
       run: |
         echo "Downloading images for tag: $TAG_NAME"
-        # 假设下载链接格式为 releases/download/<tag>/<filename>
         wget "https://github.com/rin0011/AOSP-Testkey-BootSigner/releases/download/$TAG_NAME/init_boot.img"
         wget "https://github.com/rin0011/AOSP-Testkey-BootSigner/releases/download/$TAG_NAME/vbmeta.img"
         
@@ -71,6 +65,7 @@ jobs:
         chmod +x Kernelsu/magiskboot.so
         
         echo "Running patch..."
+        # 注意：这里调用 magiskboot.so，正是我们在步骤 3 下载的文件
         ./Kernelsu/ksud boot-patch \
           -b init_boot.img \
           --magiskboot Kernelsu/magiskboot.so \
@@ -83,7 +78,6 @@ jobs:
         rm init_boot.img
         
         echo "Renaming patch result..."
-        # 查找 kernelsu_patch*.img 并重命名为 init_boot.img
         mv kernelsu_patch*.img init_boot.img
         
         ls -lh init_boot.img
@@ -91,18 +85,14 @@ jobs:
     # 步骤 7: 重新签名 (Rebuild AVB)
     - name: Rebuild AVB Signing
       run: |
-        # 克隆仓库到临时目录 'signer_temp'
         git clone https://github.com/rin0011/AOSP-Testkey-BootSigner.git signer_temp
-        
-        # 复制文件到克隆目录
         cp init_boot.img signer_temp/
         
-        # 进入目录并执行脚本
         cd signer_temp
         echo "Running rebuild_avb.py..."
-        python3 rebuild_avb.py --chained-mode
+        python3 rebuild_avb.py
         
-        # 将处理后的文件移回工作流根目录，覆盖之前的 init_boot.img
+        # 将结果移回根目录
         mv init_boot.img ../init_boot.img
         cd ..
         
