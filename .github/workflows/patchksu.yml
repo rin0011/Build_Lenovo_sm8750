@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: 'AOSP-Testkey-BootSigner Tag'
+        description: 'AOSP-Testkey-BootSigner Tag (e.g., v1.0)'
         required: true
         default: 'latest'
         type: string
@@ -81,8 +81,8 @@ jobs:
           fi
           
           # 下载 init_boot.img 和 vbmeta.img
-          gh release download -R rin0011/AOSP-Testkey-BootSigner $TAG_ARG -p 'init_boot.img'
-          gh release download -R rin0011/AOSP-Testkey-BootSigner $TAG_ARG -p 'vbmeta.img'
+          gh release download -R https://github.com/rin0011/AOSP-Testkey-BootSigner.git $TAG_ARG -p 'init_boot.img'
+          gh release download -R https://github.com/rin0011/AOSP-Testkey-BootSigner.git $TAG_ARG -p 'vbmeta.img'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
