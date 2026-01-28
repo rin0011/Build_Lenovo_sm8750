@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: 'Tgs'
+        description: 'AOSP-Testkey-BootSigner Tag'
         required: true
         default: 'latest'
         type: string
@@ -45,8 +45,14 @@ jobs:
       - name: 3. Download Magisk & Extract Tools
         run: |
           echo "Downloading Latest Magisk..."
-          # 下载最新 Magisk APK
-          gh release download -R topjohnwu/Magisk -p '*.apk' -O magisk.apk
+          # 下载最新 Magisk APK (移除 -O 以避免多文件匹配错误)
+          gh release download -R topjohnwu/Magisk -p '*.apk'
+          
+          # 查找主 APK 文件 (排除 stub) 并重命名为 magisk.apk
+          # Magisk release 通常包含 Magisk-vXX.apk 和 Stub-vXX.apk
+          apk_file=$(find . -maxdepth 1 -name "*.apk" ! -name "*stub*" -print -quit)
+          echo "Found Magisk APK: $apk_file"
+          mv "$apk_file" magisk.apk
           
           # 解压 APK 提取 x86_64/magiskboot.so
           unzip -o magisk.apk 'lib/x86_64/libmagiskboot.so' -d magisk_extract
@@ -59,6 +65,7 @@ jobs:
           
           # 清理临时文件
           rm magisk.apk
+          rm -f *.apk # 清理剩余的 stub apk
           rm -rf magisk_extract
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -114,7 +121,7 @@ jobs:
           pip install protobuf || true
           
           echo "Executing rebuild_avb.py..."
-          python3 rebuild_avb.py --chained-mode
+          python3 rebuild_avb.py
           
           # 验证生成结果
           ls -l
