@@ -3,14 +3,6 @@ name: Build KernelSU Boot Image
 on:
   workflow_dispatch:
     inputs:
-      patch_initboot:
-        description: '🔧是否同时补丁 init_boot.img？'
-        required: true
-        type: choice
-        options:
-          - 'false'
-          - 'true'
-        default: 'false'
       release_tag:
         description: '🔖选择AOSP-Testkey-BootSigner版本 (可选，不选择则自动获取最新)'
         required: false
@@ -52,7 +44,6 @@ jobs:
           echo "=========================================="
           echo "🔨 Build Configuration"
           echo "=========================================="
-          echo "Patch init_boot.img: ${{ github.event.inputs.patch_initboot }}"
           echo "Release Tag: ${{ github.event.inputs.release_tag }}"
           echo "Available Tags: ${{ needs.fetch-tags.outputs.tags }}"
           echo "=========================================="
@@ -192,10 +183,10 @@ jobs:
           
           cat bootloader_releases.json > /tmp/bootloader_releases.json
 
-      - name: Download boot.img and init_boot.img from AOSP-Testkey-BootSigner
+      - name: Download boot.img from AOSP-Testkey-BootSigner
         run: |
           cd Kernelsu
-          echo "=== Downloading boot images ==="
+          echo "=== Downloading boot.img ==="
           
           RELEASE_TAG="${{ github.event.inputs.release_tag }}"
           
@@ -217,7 +208,6 @@ jobs:
             exit 1
           fi
           
-          # Download boot.img
           BOOT_URL=$(echo "$RELEASE_INFO" | jq -r '.assets[] | select(.name=="boot.img") | .browser_download_url')
           
           if [ -z "$BOOT_URL" ] || [ "$BOOT_URL" == "null" ]; then
@@ -227,31 +217,10 @@ jobs:
             exit 1
           fi
           
-          echo "Downloading boot.img from: $BOOT_URL"
+          echo "Downloading from: $BOOT_URL"
           wget -q --show-progress "$BOOT_URL" -O boot.img || exit 1
           chmod 644 boot.img
           echo "✓ boot.img downloaded"
-          
-          # Download init_boot.img if patch_initboot is enabled
-          PATCH_INITBOOT="${{ github.event.inputs.patch_initboot }}"
-          if [ "$PATCH_INITBOOT" == "true" ]; then
-            echo "Downloading init_boot.img..."
-            INITBOOT_URL=$(echo "$RELEASE_INFO" | jq -r '.assets[] | select(.name=="init_boot.img") | .browser_download_url')
-            
-            if [ -z "$INITBOOT_URL" ] || [ "$INITBOOT_URL" == "null" ]; then
-              echo "Warning: init_boot.img not found in release $RELEASE_TAG"
-              echo "Available assets:"
-              echo "$RELEASE_INFO" | jq -r '.assets[].name'
-              echo "Continuing with boot.img only..."
-            else
-              echo "Downloading init_boot.img from: $INITBOOT_URL"
-              wget -q --show-progress "$INITBOOT_URL" -O init_boot.img || exit 1
-              chmod 644 init_boot.img
-              echo "✓ init_boot.img downloaded"
-            fi
-          else
-            echo "Skipping init_boot.img (patch_initboot is disabled)"
-          fi
           
           rm -f /tmp/bootloader_releases.json
 
@@ -278,18 +247,6 @@ jobs:
             fi
           done
           
-          # Check for init_boot.img if enabled
-          PATCH_INITBOOT="${{ github.event.inputs.patch_initboot }}"
-          if [ "$PATCH_INITBOOT" == "true" ]; then
-            if [ -f "init_boot.img" ]; then
-              SIZE=$(ls -lh "init_boot.img" | awk '{print $5}')
-              PERMS=$(ls -l "init_boot.img" | awk '{print $1}')
-              echo "✓ init_boot.img: $PERMS $SIZE"
-            else
-              echo "⚠ init_boot.img not available (will be skipped)"
-            fi
-          fi
-          
           # Check for at least one kernel module
           if ls android15-*_kernelsu.ko 1> /dev/null 2>&1; then
             echo "✓ Kernel modules found:"
@@ -306,10 +263,10 @@ jobs:
           echo ""
           echo "✓ All files verified and ready"
 
-      - name: Patch boot.img with KernelSU
+      - name: Patch boot image with KernelSU
         run: |
           cd Kernelsu
-          echo "=== Patching boot.img ==="
+          echo "=== Patching boot image ==="
           
           # Get the first available kernel module
           KERNEL_MODULE=$(ls -1 android15-*_kernelsu.ko 2>/dev/null | head -1)
@@ -328,94 +285,33 @@ jobs:
           echo "Running: ./ksud boot-patch -b boot.img --magiskboot ./magiskboot --kmi $KMI"
           ./ksud boot-patch -b boot.img --magiskboot ./magiskboot --kmi "$KMI" || exit 1
           
-          echo "✓ boot.img patched successfully"
+          echo "✓ Boot image patched successfully"
 
-      - name: Patch init_boot.img with KernelSU
+      - name: Rename patched boot image
         run: |
           cd Kernelsu
-          
-          PATCH_INITBOOT="${{ github.event.inputs.patch_initboot }}"
-          
-          if [ "$PATCH_INITBOOT" != "true" ]; then
-            echo "=== Skipping init_boot.img patching ==="
-            echo "patch_initboot is disabled"
-            exit 0
-          fi
-          
-          if [ ! -f "init_boot.img" ]; then
-            echo "=== Warning: init_boot.img not available ==="
-            echo "Skipping init_boot.img patching"
-            exit 0
-          fi
-          
-          echo "=== Patching init_boot.img ==="
-          
-          # Get the first available kernel module
-          KERNEL_MODULE=$(ls -1 android15-*_kernelsu.ko 2>/dev/null | head -1)
-          
-          if [ -z "$KERNEL_MODULE" ]; then
-            echo "ERROR: No kernel module found!"
-            exit 1
-          fi
-          
-          # Extract KMI from kernel module name
-          KMI=$(basename "$KERNEL_MODULE" _kernelsu.ko)
-          
-          echo "Using kernel module: $KERNEL_MODULE"
-          echo "KMI: $KMI"
-          echo ""
-          echo "Running: ./ksud boot-patch -b init_boot.img --magiskboot ./magiskboot --kmi $KMI"
-          ./ksud boot-patch -b init_boot.img --magiskboot ./magiskboot --kmi "$KMI" || exit 1
-          
-          echo "✓ init_boot.img patched successfully"
-
-      - name: Rename patched images
-        run: |
-          cd Kernelsu
-          echo "=== Processing patched images ==="
+          echo "=== Processing patched image ==="
           
           # List files to see what was created
           echo "Files in directory:"
           ls -la
           
-          # Process boot.img
-          PATCHED_BOOT=$(ls -1 kernelsu_patch.* 2>/dev/null | head -1)
-          if [ -n "$PATCHED_BOOT" ]; then
-            echo "Found patched boot file: $PATCHED_BOOT"
+          # Find and rename the patched file
+          PATCHED_FILE=$(ls -1 kernelsu_patch* 2>/dev/null | head -1)
+          if [ -n "$PATCHED_FILE" ]; then
+            echo "Found patched file: $PATCHED_FILE"
             rm -f boot.img
-            mv "$PATCHED_BOOT" boot.img
+            mv "$PATCHED_FILE" boot.img
             chmod 644 boot.img
-            echo "✓ Patched boot image renamed to boot.img"
+            echo "✓ Patched image renamed to boot.img"
           else
-            echo "Note: No kernelsu_patch* file found for boot"
+            echo "Note: No kernelsu_patch* file found"
             if [ -f "boot.img" ]; then
               ls -lh boot.img
               echo "✓ boot.img exists and ready"
-            fi
-          fi
-          
-          # Process init_boot.img if available
-          PATCH_INITBOOT="${{ github.event.inputs.patch_initboot }}"
-          if [ "$PATCH_INITBOOT" == "true" ] && [ -f "init_boot.img" ]; then
-            echo ""
-            echo "Processing init_boot.img..."
-            
-            # Look for kernelsu_patch* that's not the boot one we already renamed
-            # This is a bit tricky, so we'll check file timestamps or use a workaround
-            PATCHED_INITBOOT=$(find . -maxdepth 1 -name "kernelsu_patch*" -type f 2>/dev/null | head -1)
-            
-            if [ -n "$PATCHED_INITBOOT" ]; then
-              echo "Found patched init_boot file: $PATCHED_INITBOOT"
-              rm -f init_boot.img
-              mv "$PATCHED_INITBOOT" init_boot.img
-              chmod 644 init_boot.img
-              echo "✓ Patched init_boot image renamed to init_boot.img"
             else
-              echo "Note: No additional kernelsu_patch* file found for init_boot"
-              if [ -f "init_boot.img" ]; then
-                ls -lh init_boot.img
-                echo "⚠ init_boot.img status unclear"
-              fi
+              echo "ERROR: boot.img not found!"
+              exit 1
             fi
           fi
 
@@ -427,21 +323,15 @@ jobs:
           git clone https://github.com/rin0011/AOSP-Testkey-BootSigner.git signer || exit 1
           cp boot.img signer/boot.img
           
-          # Copy init_boot.img if it exists
-          if [ -f "init_boot.img" ]; then
-            cp init_boot.img signer/init_boot.img
-            echo "✓ init_boot.img copied to signer"
-          fi
-          
           echo "Contents of signer directory:"
           ls -la signer/ | head -20
           
-          echo "✓ BootSigner cloned and images copied"
+          echo "✓ BootSigner cloned and boot.img copied"
 
-      - name: Sign boot.img with AVB
+      - name: Sign boot image with AVB
         run: |
           cd Kernelsu/signer
-          echo "=== Signing boot.img ==="
+          echo "=== Signing boot image ==="
           
           echo "Current directory: $(pwd)"
           echo "Files present:"
@@ -463,52 +353,9 @@ jobs:
             python3 rebuild_avb.py || exit 1
           }
           
-          echo "✓ boot.img signed"
+          echo "✓ Boot image signed"
 
-      - name: Sign init_boot.img with AVB
-        run: |
-          cd Kernelsu/signer
-          
-          PATCH_INITBOOT="${{ github.event.inputs.patch_initboot }}"
-          
-          if [ "$PATCH_INITBOOT" != "true" ]; then
-            echo "=== Skipping init_boot.img signing ==="
-            exit 0
-          fi
-          
-          if [ ! -f "init_boot.img" ]; then
-            echo "=== Warning: init_boot.img not available, skipping signing ==="
-            exit 0
-          fi
-          
-          echo "=== Signing init_boot.img ==="
-          
-          if [ ! -f "rebuild_avb.py" ]; then
-            echo "ERROR: rebuild_avb.py not found!"
-            exit 1
-          fi
-          
-          # Create a backup of boot.img and temporarily work with init_boot.img
-          cp boot.img boot.img.bak
-          cp init_boot.img boot.img
-          
-          echo "Executing: python3 rebuild_avb.py --chained-mode (for init_boot.img)"
-          python3 rebuild_avb.py --chained-mode || {
-            echo "Signing with --chained-mode failed, trying without..."
-            python3 rebuild_avb.py || {
-              # Restore boot.img if signing failed
-              mv boot.img.bak boot.img
-              exit 1
-            }
-          }
-          
-          # Restore and save results
-          mv boot.img init_boot.img
-          mv boot.img.bak boot.img
-          
-          echo "✓ init_boot.img signed"
-
-      - name: Verify signed images
+      - name: Verify signed boot image
         run: |
           cd Kernelsu/signer
           echo "=== Final verification ==="
@@ -521,47 +368,36 @@ jobs:
           echo "Boot image details:"
           ls -lh boot.img
           file boot.img
+          
+          echo ""
+          echo "SHA256 checksum:"
           sha256sum boot.img > boot.img.sha256
           cat boot.img.sha256
           
-          # Verify init_boot.img if it exists
-          PATCH_INITBOOT="${{ github.event.inputs.patch_initboot }}"
-          if [ "$PATCH_INITBOOT" == "true" ] && [ -f "init_boot.img" ]; then
-            echo ""
-            echo "Init boot image details:"
-            ls -lh init_boot.img
-            file init_boot.img
-            sha256sum init_boot.img > init_boot.img.sha256
-            cat init_boot.img.sha256
-          fi
-          
           echo ""
-          echo "✓ Signed images ready for flashing"
+          echo "✓ Signed boot image ready for flashing"
 
-      - name: Upload artifacts
+      - name: Upload boot image artifact
         uses: actions/upload-artifact@v4
         with:
-          name: kernelsu-boot-images
-          path: |
-            Kernelsu/signer/*.img
-            Kernelsu/signer/*.sha256
+          name: kernelsu-boot-img
+          path: Kernelsu/signer/boot.img*
           retention-days: 30
-          if-no-files-found: warn
+          if-no-files-found: error
 
       - name: Create Release
         if: success()
         uses: softprops/action-gh-release@v1
         with:
           files: |
-            Kernelsu/signer/*.img
-            Kernelsu/signer/*.sha256
+            Kernelsu/signer/boot.img
+            Kernelsu/signer/boot.img.sha256
           tag_name: kernelsu-build-${{ github.run_number }}
           body: |
             🎉 KernelSU Boot Image Build Success
             
             📋 **Build Configuration**
             - 🔖 Build Number: ${{ github.run_number }}
-            - 🔧 Patch init_boot.img: ${{ github.event.inputs.patch_initboot }}
             - 🏷️ BootLoader Tag: ${{ github.event.inputs.release_tag || 'Latest' }}
             - 📅 Build Date: ${{ github.event.head_commit.timestamp }}
             - 📝 Commit: ${{ github.sha }}
@@ -572,50 +408,28 @@ jobs:
             3. ✓ Downloaded ksud-x86_64-unknown-linux-musl and set permissions
             4. ✓ Downloaded all available android15 kernel modules
             5. ✓ Downloaded and extracted Magisk magiskboot
-            6. ✓ Downloaded boot.img (and init_boot.img if enabled) from AOSP-Testkey-BootSigner
-            7. ✓ Patched boot.img with KernelSU
-            8. ✓ Patched init_boot.img with KernelSU (if enabled)
-            9. ✓ Renamed patched images
-            10. ✓ Cloned AOSP-Testkey-BootSigner repository
-            11. ✓ Signed boot.img with AVB in chained-mode
-            12. ✓ Signed init_boot.img with AVB in chained-mode (if enabled)
+            6. ✓ Downloaded boot.img from AOSP-Testkey-BootSigner
+            7. ✓ Patched boot image with KernelSU
+            8. ✓ Renamed patched image
+            9. ✓ Cloned AOSP-Testkey-BootSigner repository
+            10. ✓ Signed boot image with AVB in chained-mode
             
             📦 **Artifacts**
-            - `boot.img` - Patched and signed boot image (Ready for flashing)
-            - `boot.img.sha256` - Checksum for boot.img verification
-            ${{ github.event.inputs.patch_initboot == 'true' && '- `init_boot.img` - Patched and signed init boot image (Ready for flashing)' || '' }}
-            ${{ github.event.inputs.patch_initboot == 'true' && '- `init_boot.img.sha256` - Checksum for init_boot.img verification' || '' }}
+            - `boot.img` - Ready for flashing to your device
+            - `boot.img.sha256` - Checksum for verification
             
             🚀 **Installation Instructions**
-            
-            **For boot.img:**
-            ```bash
-            fastboot flash boot boot.img
-            ```
-            
-            ${{ github.event.inputs.patch_initboot == 'true' && '**For init_boot.img:**' || '' }}
-            ${{ github.event.inputs.patch_initboot == 'true' && '```bash' || '' }}
-            ${{ github.event.inputs.patch_initboot == 'true' && 'fastboot flash init_boot init_boot.img' || '' }}
-            ${{ github.event.inputs.patch_initboot == 'true' && '```' || '' }}
-            
-            **Verification:**
-            ```bash
-            sha256sum -c boot.img.sha256
-            ${{ github.event.inputs.patch_initboot == 'true' && 'sha256sum -c init_boot.img.sha256' || '' }}
-            ```
-            
-            **Finally:**
-            ```bash
-            fastboot reboot
-            ```
+            1. Download the `boot.img` file from this release
+            2. Verify the SHA256 checksum
+            3. Flash to your device using fastboot: `fastboot flash boot boot.img`
+            4. Reboot your device
             
             ℹ️ **About This Build**
-            This build includes:
-            - ✓ boot.img patched with KernelSU (using the latest available kernel module)
-            ${{ github.event.inputs.patch_initboot == 'true' && '- ✓ init_boot.img patched with KernelSU' || '- ✗ init_boot.img (not patched in this build)' }}
-            - ✓ Magisk boot integration
-            - ✓ Signed with AOSP test keys in chained-mode AVB
-            - ✓ Ready for installation on Lenovo SM8750 devices
+            This boot.img has been:
+            - Patched with KernelSU (using the latest available kernel module)
+            - Integrated with Magisk boot support
+            - Signed with AOSP test keys in chained-mode AVB
+            - Ready for installation on Lenovo SM8750 devices
           draft: false
           prerelease: false
         env:
