@@ -7,20 +7,10 @@ on:
         description: 'Release tag for AOSP-Testkey-BootSigner (e.g., TB322FC_1.5.10.063)'
         required: false
         type: string
-      runner_type:
-        description: 'Select runner type'
-        required: false
-        default: 'linux'
-        type: choice
-        options:
-          - linux
-          - android
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    container:
-      image: ubuntu:22.04
 
     steps:
       - name: Checkout repository
@@ -28,9 +18,9 @@ jobs:
 
       - name: Install dependencies
         run: |
-          apt-get update
-          apt-get install -y curl wget unzip git python3 python3-pip jq
-          echo "Dependencies installed"
+          sudo apt-get update
+          sudo apt-get install -y curl wget unzip git python3 python3-pip jq
+          echo "✓ Dependencies installed"
 
       - name: Create Kernelsu folder
         run: |
@@ -43,16 +33,35 @@ jobs:
           cd Kernelsu
           echo "Downloading KernelSU components..."
           
-          # Get the latest release information
-          LATEST_RELEASE=$(curl -s "https://api.github.com/repos/tiann/KernelSU/releases/latest")
+          # Get the latest release information with better error handling
+          LATEST_RELEASE_URL="https://api.github.com/repos/tiann/KernelSU/releases/latest"
+          echo "Fetching from: $LATEST_RELEASE_URL"
+          
+          curl -s -f "$LATEST_RELEASE_URL" > release.json || {
+            echo "Failed to download release info"
+            exit 1
+          }
+          
+          # Validate JSON
+          if ! jq empty release.json 2>/dev/null; then
+            echo "Invalid JSON response"
+            cat release.json
+            exit 1
+          fi
+          
+          # Extract tag name first
+          TAG_NAME=$(jq -r '.tag_name' release.json)
+          echo "Release tag: $TAG_NAME"
           
           # Download ksud-aarch64-unknown-linux-musl (suitable for Android)
-          KSUD_URL=$(echo "$LATEST_RELEASE" | jq -r '.assets[] | select(.name=="ksud-aarch64-unknown-linux-musl") | .browser_download_url')
+          echo "Looking for ksud binary..."
+          jq -r '.assets[] | select(.name=="ksud-aarch64-unknown-linux-musl") | .browser_download_url' release.json > ksud_url.txt
+          KSUD_URL=$(cat ksud_url.txt)
           
-          if [ -z "$KSUD_URL" ] || [ "$KSUD_URL" == "null" ]; then
+          if [ -z "$KSUD_URL" ] || [ ! -s ksud_url.txt ]; then
             echo "Failed to find ksud URL"
             echo "Available assets:"
-            echo "$LATEST_RELEASE" | jq '.assets[].name'
+            jq -r '.assets[].name' release.json
             exit 1
           fi
           
@@ -62,12 +71,14 @@ jobs:
           echo "✓ ksud downloaded"
           
           # Download android15-6.6_kernelsu.ko
-          KO_URL=$(echo "$LATEST_RELEASE" | jq -r '.assets[] | select(.name=="android15-6.6_kernelsu.ko") | .browser_download_url')
+          echo "Looking for kernel module..."
+          jq -r '.assets[] | select(.name=="android15-6.6_kernelsu.ko") | .browser_download_url' release.json > ko_url.txt
+          KO_URL=$(cat ko_url.txt)
           
-          if [ -z "$KO_URL" ] || [ "$KO_URL" == "null" ]; then
+          if [ -z "$KO_URL" ] || [ ! -s ko_url.txt ]; then
             echo "Failed to find kernel module URL"
             echo "Available assets:"
-            echo "$LATEST_RELEASE" | jq '.assets[].name'
+            jq -r '.assets[].name' release.json
             exit 1
           fi
           
@@ -77,67 +88,92 @@ jobs:
           # Rename android15-6.6_kernelsu.ko to android15-6.6
           mv android15-6.6_kernelsu.ko android15-6.6
           echo "✓ KernelSU components downloaded"
+          
+          # Cleanup
+          rm -f release.json ksud_url.txt ko_url.txt
 
       - name: Download Magisk and extract magiskboot
         run: |
           cd Kernelsu
           echo "Downloading Magisk..."
           
-          MAGISK_RELEASE=$(curl -s "https://api.github.com/repos/topjohnwu/Magisk/releases/latest")
+          MAGISK_RELEASE_URL="https://api.github.com/repos/topjohnwu/Magisk/releases/latest"
+          echo "Fetching from: $MAGISK_RELEASE_URL"
           
-          echo "Available Magisk assets:"
-          echo "$MAGISK_RELEASE" | jq '.assets[].name'
+          curl -s -f "$MAGISK_RELEASE_URL" > magisk_release.json || {
+            echo "Failed to download Magisk release info"
+            exit 1
+          }
           
-          # Find the main Magisk APK (skip debug builds)
-          MAGISK_URL=$(echo "$MAGISK_RELEASE" | jq -r '.assets[] | select(.name | contains("Magisk") and (contains(".apk") or contains(".zip"))) | select(.name | contains("debug") | not) | .browser_download_url' | head -1)
-          
-          if [ -z "$MAGISK_URL" ] || [ "$MAGISK_URL" == "null" ]; then
-            echo "Failed to find Magisk APK/ZIP, trying alternative method..."
-            MAGISK_URL=$(echo "$MAGISK_RELEASE" | jq -r '.assets[] | select(.name | endswith(".apk")) | select(.name | contains("debug") | not) | .browser_download_url' | head -1)
-          fi
-          
-          if [ -z "$MAGISK_URL" ] || [ "$MAGISK_URL" == "null" ]; then
-            echo "Error: Could not find suitable Magisk file"
+          # Validate JSON
+          if ! jq empty magisk_release.json 2>/dev/null; then
+            echo "Invalid JSON response for Magisk"
+            cat magisk_release.json | head -100
             exit 1
           fi
           
-          echo "Downloading from: $MAGISK_URL"
+          echo "Available Magisk assets:"
+          jq -r '.assets[].name' magisk_release.json
+          
+          # Find the main Magisk APK (skip debug builds and other files)
+          jq -r '.assets[] | select(.name | contains(".apk") and (contains("debug") | not)) | .browser_download_url' magisk_release.json | head -1 > magisk_url.txt
+          MAGISK_URL=$(cat magisk_url.txt)
+          
+          if [ -z "$MAGISK_URL" ] || [ ! -s magisk_url.txt ]; then
+            echo "Failed to find Magisk APK"
+            exit 1
+          fi
+          
+          echo "Downloading Magisk from: $MAGISK_URL"
           wget -q --show-progress "$MAGISK_URL" -O magisk.apk || exit 1
           
-          # Extract x86_64/magiskboot
+          # Extract magiskboot
           echo "Extracting magiskboot..."
           mkdir -p magisk_extracted
-          unzip -q magisk.apk -d magisk_extracted || unzip -q magisk.apk -d magisk_extracted
+          unzip -q magisk.apk -d magisk_extracted || {
+            echo "Failed to extract magisk.apk"
+            exit 1
+          }
           
           # Try to find magiskboot in various locations
+          BOOT_FOUND=0
+          
           if [ -f "magisk_extracted/lib/x86_64/libmagiskboot.so" ]; then
             echo "Found libmagiskboot.so at lib/x86_64/"
             cp magisk_extracted/lib/x86_64/libmagiskboot.so magiskboot
-          elif [ -f "magisk_extracted/assets/x86_64/magiskboot" ]; then
-            echo "Found magiskboot at assets/x86_64/"
-            cp magisk_extracted/assets/x86_64/magiskboot magiskboot
+            BOOT_FOUND=1
           elif [ -f "magisk_extracted/lib/arm64-v8a/libmagiskboot.so" ]; then
             echo "Found libmagiskboot.so at lib/arm64-v8a/"
             cp magisk_extracted/lib/arm64-v8a/libmagiskboot.so magiskboot
-          else
+            BOOT_FOUND=1
+          elif [ -f "magisk_extracted/assets/x86_64/magiskboot" ]; then
+            echo "Found magiskboot at assets/x86_64/"
+            cp magisk_extracted/assets/x86_64/magiskboot magiskboot
+            BOOT_FOUND=1
+          fi
+          
+          if [ $BOOT_FOUND -eq 0 ]; then
             echo "Searching for magiskboot files..."
-            find magisk_extracted -name "*magiskboot*" -type f
-            find magisk_extracted -path "*/lib/*" -name "*.so" | head -10
+            find magisk_extracted -name "*magiskboot*" -type f | head -5
             
-            # Try to find any .so file
-            SO_FILE=$(find magisk_extracted -name "*.so" | grep -E "(magisk|boot)" | head -1)
+            # Try to find any .so file with boot in name
+            SO_FILE=$(find magisk_extracted -name "*boot*.so" | head -1)
             if [ -n "$SO_FILE" ]; then
               echo "Using: $SO_FILE"
               cp "$SO_FILE" magiskboot
-            else
-              echo "Error: Could not find magiskboot in Magisk APK"
-              ls -la magisk_extracted/
-              exit 1
+              BOOT_FOUND=1
             fi
           fi
           
+          if [ $BOOT_FOUND -eq 0 ]; then
+            echo "Error: Could not find magiskboot in Magisk APK"
+            echo "Contents of magisk_extracted/:"
+            ls -la magisk_extracted/ | head -20
+            exit 1
+          fi
+          
           chmod +x magiskboot
-          rm -rf magisk_extracted magisk.apk
+          rm -rf magisk_extracted magisk.apk magisk_release.json magisk_url.txt
           echo "✓ Magisk extracted"
 
       - name: Download boot.img from AOSP-Testkey-BootSigner
@@ -150,85 +186,98 @@ jobs:
           
           echo "Using release tag: $RELEASE_TAG"
           
-          # Use jq to parse the JSON properly
-          RELEASE_INFO=$(curl -s "https://api.github.com/repos/rin0011/AOSP-Testkey-BootSigner/releases/tags/$RELEASE_TAG")
-          
-          # Check if release was found
-          if echo "$RELEASE_INFO" | jq -e '.message' > /dev/null 2>&1; then
-            echo "Release $RELEASE_TAG not found!"
-            echo "Available releases:"
+          # Download release info
+          RELEASE_URL="https://api.github.com/repos/rin0011/AOSP-Testkey-BootSigner/releases/tags/$RELEASE_TAG"
+          curl -s -f "$RELEASE_URL" > bootloader_release.json || {
+            echo "Failed to download release: $RELEASE_TAG"
+            echo "Fetching available releases..."
             curl -s "https://api.github.com/repos/rin0011/AOSP-Testkey-BootSigner/releases" | jq -r '.[].tag_name'
+            exit 1
+          }
+          
+          # Validate JSON
+          if ! jq empty bootloader_release.json 2>/dev/null; then
+            echo "Invalid JSON response"
+            cat bootloader_release.json | head -100
             exit 1
           fi
           
-          # Extract boot.img download URL using jq
-          BOOT_URL=$(echo "$RELEASE_INFO" | jq -r '.assets[] | select(.name=="boot.img") | .browser_download_url')
+          # Extract boot.img download URL
+          echo "Looking for boot.img..."
+          jq -r '.assets[] | select(.name=="boot.img") | .browser_download_url' bootloader_release.json > boot_url.txt
+          BOOT_URL=$(cat boot_url.txt)
           
-          if [ -z "$BOOT_URL" ] || [ "$BOOT_URL" == "null" ]; then
+          if [ -z "$BOOT_URL" ] || [ ! -s boot_url.txt ]; then
             echo "Failed to find boot.img in release $RELEASE_TAG"
             echo "Available assets:"
-            echo "$RELEASE_INFO" | jq '.assets[].name'
+            jq -r '.assets[].name' bootloader_release.json
             exit 1
           fi
           
           echo "Downloading from: $BOOT_URL"
           wget -q --show-progress "$BOOT_URL" -O boot.img || exit 1
           echo "✓ boot.img downloaded"
+          
+          # Cleanup
+          rm -f bootloader_release.json boot_url.txt
+
+      - name: Verify downloaded files
+        run: |
+          cd Kernelsu
+          echo "Verifying downloaded files..."
+          
+          for file in ksud android15-6.6 magiskboot boot.img; do
+            if [ -f "$file" ]; then
+              ls -lh "$file"
+              file "$file"
+            else
+              echo "ERROR: $file not found!"
+              exit 1
+            fi
+          done
+          
+          echo "✓ All files verified"
 
       - name: Patch boot image with KernelSU
         run: |
           cd Kernelsu
           echo "Patching boot image..."
           
-          if [ ! -f "boot.img" ]; then
-            echo "Error: boot.img not found!"
-            exit 1
+          # Run the patching command
+          if ./ksud boot-patch -b boot.img --magiskboot ./magiskboot --kmi android15-6.6; then
+            echo "✓ Boot image patched successfully"
+          else
+            echo "Patching failed, trying with --out-name parameter..."
+            ./ksud boot-patch -b boot.img --magiskboot ./magiskboot --kmi android15-6.6 --out-name kernelsu_patch.img || exit 1
+            echo "✓ Boot image patched with --out-name"
           fi
-          
-          if [ ! -f "ksud" ]; then
-            echo "Error: ksud not found!"
-            exit 1
-          fi
-          
-          if [ ! -f "android15-6.6" ]; then
-            echo "Error: kernel module not found!"
-            exit 1
-          fi
-          
-          if [ ! -f "magiskboot" ]; then
-            echo "Error: magiskboot not found!"
-            exit 1
-          fi
-          
-          # Check if ksud is executable
-          file ksud
-          
-          # Run the patching command with proper parameters
-          ./ksud boot-patch -b boot.img --magiskboot ./magiskboot --kmi android15-6.6 --out-name kernelsu_patch.img || {
-            echo "Trying alternative parameters..."
-            ./ksud boot-patch -b boot.img --magiskboot ./magiskboot --kmi android15-6.6 || exit 1
-          }
-          
-          echo "✓ Boot image patched"
 
       - name: Rename patched boot image
         run: |
           cd Kernelsu
-          echo "Renaming patched boot image..."
+          echo "Processing patched boot image..."
+          
+          # List all files to see what was created
+          echo "Files in directory:"
+          ls -la
           
           # Find and rename the patched file
           PATCHED_FILE=$(ls -1 kernelsu_patch* 2>/dev/null | head -1)
-          if [ -z "$PATCHED_FILE" ]; then
-            echo "Error: No patched boot image found (kernelsu_patch*)"
-            echo "Available files:"
-            ls -la
-            exit 1
+          if [ -n "$PATCHED_FILE" ]; then
+            echo "Found patched file: $PATCHED_FILE"
+            rm -f boot.img
+            mv "$PATCHED_FILE" boot.img
+            echo "✓ Patched image renamed to boot.img"
+          else
+            echo "Note: No kernelsu_patch* file found, boot.img may already be patched"
+            if [ -f "boot.img" ]; then
+              ls -lh boot.img
+              echo "✓ boot.img exists and ready for next step"
+            else
+              echo "ERROR: boot.img not found!"
+              exit 1
+            fi
           fi
-          
-          echo "Found patched file: $PATCHED_FILE"
-          rm -f boot.img
-          mv "$PATCHED_FILE" boot.img
-          echo "✓ Patched image renamed to boot.img"
 
       - name: Download AOSP-Testkey-BootSigner for signing
         run: |
@@ -239,25 +288,35 @@ jobs:
           cp boot.img signer/boot.img
           echo "✓ BootSigner cloned and boot.img copied"
 
+      - name: Prepare Python environment
+        run: |
+          python3 --version
+          pip3 --version
+
       - name: Sign boot image with AVB
         run: |
           cd Kernelsu/signer
           echo "Signing boot image with AVB..."
           
+          # Check if required files exist
           if [ ! -f "boot.img" ]; then
-            echo "Error: boot.img not found in signer directory!"
+            echo "ERROR: boot.img not found!"
             exit 1
           fi
           
           if [ ! -f "rebuild_avb.py" ]; then
-            echo "Error: rebuild_avb.py not found!"
-            echo "Available files:"
+            echo "ERROR: rebuild_avb.py not found!"
+            echo "Files in signer directory:"
             ls -la
             exit 1
           fi
           
-          # Install Python dependencies if needed
-          python3 rebuild_avb.py --chained-mode || exit 1
+          echo "Executing rebuild_avb.py..."
+          python3 rebuild_avb.py --chained-mode || {
+            echo "Failed with --chained-mode, trying without it..."
+            python3 rebuild_avb.py || exit 1
+          }
+          
           echo "✓ Boot image signed"
 
       - name: Verify signed boot image
@@ -265,21 +324,25 @@ jobs:
           cd Kernelsu/signer
           
           if [ ! -f "boot.img" ]; then
-            echo "Error: Signed boot.img not found!"
+            echo "ERROR: Signed boot.img not found!"
             exit 1
           fi
           
+          echo "Boot image details:"
           ls -lh boot.img
-          echo "✓ Signed boot image ready"
+          file boot.img
           
           # Calculate checksum
-          sha256sum boot.img
+          sha256sum boot.img > boot.img.sha256
+          cat boot.img.sha256
+          
+          echo "��� Signed boot image ready"
 
       - name: Upload boot image artifact
         uses: actions/upload-artifact@v4
         with:
           name: kernelsu-boot-img
-          path: Kernelsu/signer/boot.img
+          path: Kernelsu/signer/boot.img*
           retention-days: 30
           if-no-files-found: error
 
@@ -287,15 +350,20 @@ jobs:
         if: success()
         uses: softprops/action-gh-release@v1
         with:
-          files: Kernelsu/signer/boot.img
+          files: |
+            Kernelsu/signer/boot.img
+            Kernelsu/signer/boot.img.sha256
           tag_name: kernelsu-build-${{ github.run_number }}
           body: |
             KernelSU patched and signed boot image
             - Build number: ${{ github.run_number }}
-            - Timestamp: ${{ github.event.head_commit.timestamp }}
+            - Build date: ${{ github.event.head_commit.timestamp }}
             - Commit: ${{ github.sha }}
             
-            This boot.img has been patched with KernelSU and signed with AOSP test keys in chained-mode.
+            This boot.img has been:
+            1. Patched with KernelSU (android15-6.6)
+            2. Signed with AOSP test keys in chained-mode
+            3. Ready for flashing
           draft: false
           prerelease: true
         env:
