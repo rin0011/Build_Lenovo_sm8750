@@ -1,240 +1,118 @@
-name: Build KernelSU init_Boot Image
+name: KernelSU Patch & Sign Workflow
 
 on:
   workflow_dispatch:
     inputs:
-      release_tag:
-        description: '🔖选择AOSP-Testkey-BootSigner版本 (可选，不选择则自动获取最新)'
-        required: false
-        type: choice
-        options:
-          - ''
-          - 'TB322FC_1.5.10.063'
-          - 'TB322FC_1.1.11.263'
-
-permissions:
-  contents: write
+      tag:
+        description: 'AOSP-Testkey-BootSigner Release Tag (e.g., v1.0)'
+        required: true
+        type: string
+        default: 'latest'
 
 jobs:
-  fetch-tags:
+  patch-and-sign:
     runs-on: ubuntu-latest
-    outputs:
-      tags: ${{ steps.get-tags.outputs.tags }}
+    
     steps:
-      - name: Fetch available tags from AOSP-Testkey-BootSigner
-        id: get-tags
-        # 增加超时限制防止卡死
-        timeout-minutes: 5
-        run: |
-          TAGS=$(curl -s "https://api.github.com/repos/rin0011/AOSP-Testkey-BootSigner/releases" | jq -r '.[].tag_name' | tr '\n' ',' | sed 's/,$//')
-          echo "tags=$TAGS" >> $GITHUB_OUTPUT
-          echo "Available tags: $TAGS"
+    # 基础环境准备
+    - name: Checkout Repository
+      uses: actions/checkout@v4
 
-  build:
-    needs: fetch-tags
-    runs-on: ubuntu-latest
+    - name: Setup Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.x'
 
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+    # 步骤 1 & 2: 创建文件夹并下载 KernelSU 相关文件
+    - name: Setup KernelSU Files
+      run: |
+        # 1. 创建 Kernelsu 文件夹
+        mkdir -p Kernelsu
+        
+        # 2. 下载 ksud 和内核模块
+        echo "Downloading KernelSU files..."
+        wget -O Kernelsu/ksud "https://github.com/tiann/KernelSU/releases/latest/download/ksud-x86_64-unknown-linux-musl"
+        wget -O Kernelsu/android15-6.6 "https://github.com/tiann/KernelSU/releases/latest/download/android15-6.6_kernelsu.ko"
+        
+        echo "KernelSU files downloaded."
 
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y curl wget unzip git python3 python3-pip jq file
-          # 【修复 1】安装 Python 签名工具通常需要的库
-          pip3 install --upgrade pip
-          pip3 install protobuf cryptography
-          echo "✓ Dependencies installed"
+    # 步骤 3: 下载并提取 Magiskboot
+    - name: Setup Magiskboot
+      run: |
+        echo "Downloading Magisk..."
+        wget -O Magisk.apk "https://github.com/topjohnwu/Magisk/releases/latest/download/Magisk.apk"
+        
+        echo "Extracting magiskboot..."
+        # 注意：Magisk APK 中 magiskboot 通常位于 lib/x86_64/libmagiskboot.so
+        # 我们使用 unzip -j (junk paths) 直接提取文件而不保留目录结构
+        unzip -j Magisk.apk "lib/x86_64/libmagiskboot.so" -d Kernelsu/
+        
+        # 重命名为 magiskboot.so 以匹配你的指令
+        mv Kernelsu/libmagiskboot.so Kernelsu/magiskboot.so
+        echo "Magiskboot setup complete."
 
-      - name: Display selected options
-        run: |
-          echo "=========================================="
-          echo "🔨 Build Configuration"
-          echo "=========================================="
-          echo "Target Images: init_boot.img & vbmeta.img"
-          echo "Release Tag: ${{ github.event.inputs.release_tag }}"
-          echo "Available Tags: ${{ needs.fetch-tags.outputs.tags }}"
-          echo "=========================================="
+    # 步骤 4: 下载指定 Tag 的镜像文件
+    - name: Download Images
+      env:
+        TAG_NAME: ${{ inputs.tag }}
+      run: |
+        echo "Downloading images for tag: $TAG_NAME"
+        # 假设下载链接格式为 releases/download/<tag>/<filename>
+        wget "https://github.com/rin0011/AOSP-Testkey-BootSigner/releases/download/$TAG_NAME/init_boot.img"
+        wget "https://github.com/rin0011/AOSP-Testkey-BootSigner/releases/download/$TAG_NAME/vbmeta.img"
+        
+        ls -lh *.img
 
-      - name: Create Kernelsu folder
-        run: |
-          mkdir -p Kernelsu
-          cd Kernelsu
-          pwd
+    # 步骤 5: 执行 ksud boot-patch
+    - name: Run KernelSU Patch
+      run: |
+        echo "Setting permissions..."
+        chmod +x Kernelsu/ksud
+        chmod +x Kernelsu/magiskboot.so
+        
+        echo "Running patch..."
+        ./Kernelsu/ksud boot-patch \
+          -b init_boot.img \
+          --magiskboot Kernelsu/magiskboot.so \
+          --kmi android15-6.6
 
-      - name: Download KernelSU latest releases
-        run: |
-          cd Kernelsu
-          echo "=== Downloading KernelSU components ==="
-          
-          LATEST_RELEASE_URL="https://api.github.com/repos/tiann/KernelSU/releases/latest"
-          curl -s -f "$LATEST_RELEASE_URL" > release.json || { echo "Failed to download release info"; exit 1; }
-          
-          TAG_NAME=$(jq -r '.tag_name' release.json 2>/dev/null || echo "unknown")
-          echo "Release tag: $TAG_NAME"
-          
-          # Download ksud
-          KSUD_URL=$(jq -r '.assets[] | select(.name=="ksud-x86_64-unknown-linux-musl") | .browser_download_url' release.json)
-          wget -q --show-progress "$KSUD_URL" -O ksud || exit 1
-          chmod +x ksud
-          
-          # Download android15 kernel modules
-          echo "Downloading android15 kernel modules..."
-          jq -r '.assets[] | select(.name | contains("android15") and contains(".ko")) | "\(.browser_download_url)|\(.name)"' release.json | while IFS='|' read -r url name; do
-            echo "Downloading: $name"
-            wget -q "$url" -O "$name" || continue
-          done
-          
-          rm -f release.json
+    # 步骤 6: 处理生成的文件
+    - name: Rename Patched Image
+      run: |
+        echo "Removing original init_boot.img..."
+        rm init_boot.img
+        
+        echo "Renaming patch result..."
+        # 查找 kernelsu_patch*.img 并重命名为 init_boot.img
+        mv kernelsu_patch*.img init_boot.img
+        
+        ls -lh init_boot.img
 
-      - name: Download Magisk and extract magiskboot
-        run: |
-          cd Kernelsu
-          echo "=== Downloading Magisk ==="
-          
-          MAGISK_URL="https://api.github.com/repos/topjohnwu/Magisk/releases/latest"
-          curl -s -f "$MAGISK_URL" > magisk_release.json || exit 1
-          
-          APK_URL=$(jq -r '.assets[] | select(.name | contains(".apk") and (contains("debug") | not)) | .browser_download_url' magisk_release.json | head -1)
-          wget -q --show-progress "$APK_URL" -O magisk.apk || exit 1
-          
-          mkdir -p magisk_extracted
-          unzip -q magisk.apk -d magisk_extracted || exit 1
-          
-          # 优化查找逻辑，优先找 x86_64
-          if [ -f "magisk_extracted/lib/x86_64/libmagiskboot.so" ]; then
-            cp magisk_extracted/lib/x86_64/libmagiskboot.so magiskboot
-          elif [ -f "magisk_extracted/lib/arm64-v8a/libmagiskboot.so" ]; then
-            cp magisk_extracted/lib/arm64-v8a/libmagiskboot.so magiskboot
-          else
-             # 尝试直接找 magiskboot 二进制文件（旧版或不同架构）
-             find magisk_extracted -name magiskboot -type f -exec cp {} ./magiskboot \; -quit
-          fi
-          
-          if [ ! -f "magiskboot" ]; then
-            echo "Failed to extract magiskboot!"
-            exit 1
-          fi
-          
-          chmod +x magiskboot
-          rm -rf magisk_extracted magisk.apk magisk_release.json
+    # 步骤 7: 重新签名 (Rebuild AVB)
+    - name: Rebuild AVB Signing
+      run: |
+        # 克隆仓库到临时目录 'signer_temp'
+        git clone https://github.com/rin0011/AOSP-Testkey-BootSigner.git signer_temp
+        
+        # 复制文件到克隆目录
+        cp init_boot.img signer_temp/
+        
+        # 进入目录并执行脚本
+        cd signer_temp
+        echo "Running rebuild_avb.py..."
+        python3 rebuild_avb.py --chained-mode
+        
+        # 将处理后的文件移回工作流根目录，覆盖之前的 init_boot.img
+        mv init_boot.img ../init_boot.img
+        cd ..
+        
+        echo "Signing complete."
 
-      - name: Fetch AOSP-Testkey-BootSigner releases
-        run: |
-          curl -s "https://api.github.com/repos/rin0011/AOSP-Testkey-BootSigner/releases" > bootloader_releases.json
-          # 缓存到 /tmp 以便后续步骤使用
-          cp bootloader_releases.json /tmp/bootloader_releases.json
-
-      - name: Download init_boot.img and vbmeta.img
-        run: |
-          cd Kernelsu
-          RELEASE_TAG="${{ github.event.inputs.release_tag }}"
-          
-          if [ -z "$RELEASE_TAG" ]; then
-            RELEASE_TAG=$(jq -r '.[0].tag_name' /tmp/bootloader_releases.json)
-            echo "Auto-selected latest tag: $RELEASE_TAG"
-          fi
-          
-          RELEASE_INFO=$(jq ".[] | select(.tag_name==\"$RELEASE_TAG\")" /tmp/bootloader_releases.json)
-          if [ -z "$RELEASE_INFO" ] || [ "$RELEASE_INFO" == "null" ]; then
-             echo "Error: Release $RELEASE_TAG not found"; exit 1
-          fi
-          
-          INITBOOT_URL=$(echo "$RELEASE_INFO" | jq -r '.assets[] | select(.name=="init_boot.img") | .browser_download_url')
-          VBMETA_URL=$(echo "$RELEASE_INFO" | jq -r '.assets[] | select(.name=="vbmeta.img") | .browser_download_url')
-          
-          wget -q --show-progress "$INITBOOT_URL" -O init_boot.img || exit 1
-          
-          if [ ! -z "$VBMETA_URL" ] && [ "$VBMETA_URL" != "null" ]; then
-            wget -q --show-progress "$VBMETA_URL" -O vbmeta.img
-          else
-            echo "Warning: vbmeta.img not found"
-          fi
-
-      - name: Patch init_boot.img with KernelSU
-        run: |
-          cd Kernelsu
-          echo "=== Patching init_boot.img ==="
-          
-          # 获取第一个可用的内核模块
-          KERNEL_MODULE=$(ls -1 android15-*_kernelsu.ko 2>/dev/null | head -1)
-          
-          if [ -z "$KERNEL_MODULE" ]; then
-            echo "ERROR: No android15 kernel module found!"
-            exit 1
-          fi
-          
-          # 从文件名提取 KMI (例如: android15-5.15.110_kernelsu.ko -> 5.15.110)
-          # 注意：这里假设文件名格式固定。如果文件名包含 "android15-", 去掉前缀和后缀
-          KMI=$(basename "$KERNEL_MODULE" _kernelsu.ko | sed 's/android15-//')
-          
-          echo "🎯 Selected Module: $KERNEL_MODULE"
-          echo "🎯 Detected KMI: $KMI"
-          
-          ./ksud boot-patch -b init_boot.img --magiskboot ./magiskboot --kmi "$KMI" || exit 1
-          
-          # 重命名产物
-          PATCHED_IMG=$(ls kernelsu_patched* | head -1)
-          if [ -f "$PATCHED_IMG" ]; then
-             mv "$PATCHED_IMG" init_boot_patched.img
-             echo "✓ Success! Created init_boot_patched.img"
-          else
-             echo "✗ Patch failed, output file not found"
-             exit 1
-          fi
-
-      - name: Sign init_boot.img with AVB
-        run: |
-          cd Kernelsu
-          echo "=== Setting up Signer ==="
-          git clone https://github.com/rin0011/AOSP-Testkey-BootSigner.git signer
-          
-          # 准备文件：signer 脚本通常默认操作名为 boot.img 的文件
-          cp init_boot_patched.img signer/boot.img
-          [ -f vbmeta.img ] && cp vbmeta.img signer/vbmeta.img
-          
-          cd signer
-          
-          # 如果仓库里有 requirements.txt，安装它；否则依赖我们在 Install dependencies 步骤装的包
-          if [ -f "requirements.txt" ]; then
-            pip3 install -r requirements.txt
-          fi
-          
-          echo "=== Signing (Chained Mode) ==="
-          # 尝试签名
-          python3 rebuild_avb.py --chained-mode || python3 rebuild_avb.py || exit 1
-          
-          # 将签名后的 boot.img 重命名回 init_boot.img 以便发布
-          mv boot.img ../init_boot.img
-          echo "✓ Signed successfully"
-
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: kernelsu-init-boot-image
-          path: |
-            Kernelsu/init_boot.img
-            Kernelsu/vbmeta.img
-
-      - name: Create Release
-        if: success()
-        uses: softprops/action-gh-release@v1
-        with:
-          files: |
-            Kernelsu/init_boot.img
-            Kernelsu/vbmeta.img
-          tag_name: kernelsu-build-${{ github.run_number }}
-          body: |
-            🎉 **KernelSU Build Success**
-            - **Tag:** ${{ github.event.inputs.release_tag || 'Latest' }}
-            - **KernelSU:** Latest Release
-            
-            **How to use:**
-            ```bash
-            fastboot flash init_boot init_boot.img
-            fastboot flash vbmeta vbmeta.img
-            fastboot reboot
-            ```
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    # 步骤 8: 上传构建产物
+    - name: Upload Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: patched-images
+        path: |
+          init_boot.img
+          vbmeta.img
