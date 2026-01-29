@@ -98,6 +98,7 @@ jobs:
         
         # 将结果移回根目录
         mv init_boot.img ../init_boot.img
+        mv vbmeta.img ../vbmeta.img
         cd ..
         
         echo "Signing complete."
