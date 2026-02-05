@@ -48,6 +48,14 @@ jobs:
     # 6. 编译Release版本APK
     - name: 编译Release APK
       run: ./gradlew assembleRelease --stacktrace
+
+    - name: 列出编译产物
+      run: |
+        echo "=== 查找所有APK文件 ==="
+        find . -name "*.apk" -type f
+        echo ""
+        echo "=== app/build目录结构 ==="
+        ls -R app/build/outputs/ || echo "outputs目录不存在"
     
     # 7. 上传APK到Artifacts
     - name: 上传APK文件
