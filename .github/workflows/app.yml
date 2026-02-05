@@ -23,13 +23,13 @@ jobs:
         cache: gradle
     
     # 3. 生成签名文件(用于Release编译)
-    - name: 生成调试签名文件
-      run: |
-        cd app
-        keytool -genkey -v -keystore BUNNY.jks -keyalg RSA -keysize 2048 -validity 10000 \
-          -alias bunny -keypass 426000 -storepass 000624 \
-          -dname "CN=GitHub Actions, OU=CI, O=CI, L=Beijing, ST=Beijing, C=CN"
-        cd ..
+    # - name: 生成调试签名文件
+    #   run: |
+    #     cd app
+    #     keytool -genkey -v -keystore BUNNY.jks -keyalg RSA -keysize 2048 -validity 10000 \
+    #       -alias bunny -keypass 426000 -storepass 000624 \
+    #       -dname "CN=GitHub Actions, OU=CI, O=CI, L=Beijing, ST=Beijing, C=CN"
+    #     cd ..
     
     # 6. 编译Release版本APK
     - name: 编译Release APK
