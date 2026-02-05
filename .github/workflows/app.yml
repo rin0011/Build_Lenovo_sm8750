@@ -55,7 +55,7 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         name: box-release-apk
-        path: app/build/outputs/*.apk
+        path: app/*.apk
         retention-days: 30
     
     # 8. 显示编译信息
