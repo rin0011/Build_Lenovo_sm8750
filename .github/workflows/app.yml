@@ -30,11 +30,11 @@ jobs:
     #       -alias bunny -keypass 426000 -storepass 000624 \
     #       -dname "CN=GitHub Actions, OU=CI, O=CI, L=Beijing, ST=Beijing, C=CN"
     #     cd ..
-    
-    # 6. 编译Release版本APK
-    - name: 编译Release APK
-      run: ./gradlew assembleRelease --stacktrace
 
+    - name: 赋予gradlew执行权限
+      run: chmod 777 gradlew
+    
+    # 5. 缓存Gradle依赖
     - name: 缓存Gradle依赖
       uses: actions/cache@v4
       with:
@@ -44,6 +44,10 @@ jobs:
         key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
         restore-keys: |
           ${{ runner.os }}-gradle-
+    
+    # 6. 编译Release版本APK
+    - name: 编译Release APK
+      run: ./gradlew assembleRelease --stacktrace
     
     # 7. 上传APK到Artifacts
     - name: 上传APK文件
