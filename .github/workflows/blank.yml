@@ -1,0 +1,106 @@
+name: KernelSU Patch
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '选择tags'
+        required: false
+        type: choice
+        options:
+          - 'TB322FC_1.5.10.063'
+          - 'TB322FC_1.1.11.263'
+
+jobs:
+  patch-and-sign:
+    runs-on: ubuntu-latest
+    
+    steps:
+    # 基础环境准备
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+
+    - name: Setup Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.x'
+
+    # 步骤 1 & 2: 创建文件夹并下载 KernelSU 相关文件
+    - name: Setup KernelSU Files
+      run: |
+        # 1. 创建 Kernelsu 文件夹
+        mkdir -p Kernelsu
+        
+        # 2. 下载 ksud 和内核模块
+        echo "Downloading KernelSU files..."
+        wget -O Kernelsu/ksud "https://github.com/tiann/KernelSU/releases/latest/download/ksud-x86_64-unknown-linux-musl"
+        wget -O Kernelsu/android15-6.6 "https://github.com/tiann/KernelSU/releases/latest/download/android15-6.6_kernelsu.ko"
+        
+        echo "KernelSU files downloaded."
+    # 步骤 3 (已修改): 从 AOSP-Testkey-BootSigner 获取 magiskboot
+    - name: Download Magiskboot Tool
+      run: |
+        echo "Downloading magiskboot from rin0011 tools..."
+        # 直接使用 raw.githubusercontent.com 下载 master 分支下的 tools/magiskboot
+        # 并将其保存为 magiskboot.so 以匹配后续 Step 5 的参数要求
+        wget -O Kernelsu/magiskboot.so "https://raw.githubusercontent.com/rin0011/AOSP-Testkey-BootSigner/master/tools/magiskboot"
+        
+        echo "Magiskboot downloaded successfully."
+    # 步骤 4: 下载指定 Tag 的镜像文件
+    - name: Download Images
+      env:
+        TAG_NAME: ${{ inputs.tag }}
+      run: |
+        echo "Downloading images for tag: $TAG_NAME"
+        wget "https://github.com/rin0011/AOSP-Testkey-BootSigner/releases/download/$TAG_NAME/init_boot.img"
+        wget "https://github.com/rin0011/AOSP-Testkey-BootSigner/releases/download/$TAG_NAME/vbmeta.img"
+        
+        ls -lh *.img
+    # 步骤 5: 执行 ksud boot-patch
+    - name: Run KernelSU Patch
+      run: |
+        echo "Setting permissions..."
+        chmod +x Kernelsu/ksud
+        chmod +x Kernelsu/magiskboot.so
+        
+        echo "Running patch..."
+        # 注意：这里调用 magiskboot.so，正是我们在步骤 3 下载的文件
+        ./Kernelsu/ksud boot-patch \
+          -b init_boot.img \
+          --magiskboot Kernelsu/magiskboot.so \
+          --kmi android15-6.6
+    # 步骤 6: 处理生成的文件
+    - name: Rename Patched Image
+      run: |
+        echo "Removing original init_boot.img..."
+        rm init_boot.img
+        
+        echo "Renaming patch result..."
+        mv kernelsu_patch*.img init_boot.img
+        
+        ls -lh init_boot.img
+    # 步骤 7: 重新签名 (Rebuild AVB)
+    - name: Rebuild AVB Signing
+      run: |
+        git clone https://github.com/rin0011/AOSP-Testkey-BootSigner.git signer_temp
+        cp init_boot.img signer_temp/
+        cp vbmeta.img signer_temp/
+        
+        cd signer_temp
+        echo "Running rebuild_avb.py..."
+        python3 rebuild_avb.py
+        
+        # 将结果移回根目录
+        mv init_boot.img ../init_boot.img
+        mv vbmeta.img ../vbmeta.img
+        cd ..
+        
+        echo "Signing complete."
+    # 步骤 8: 上传构建产物
+    - name: Upload Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: patched-images
+        path: |
+          init_boot.img
+          vbmeta.img
