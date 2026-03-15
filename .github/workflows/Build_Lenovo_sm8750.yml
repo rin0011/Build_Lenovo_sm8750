@@ -160,23 +160,144 @@ jobs:
 
       - name: 🛠 Set ccache DIR(配置ccache目录)
         run: |
-          echo "CCACHE_DIR=$HOME/.ccache_${{ env.KERNEL_VERSION }}" >> $GITHUB_ENV
-          echo "CCACHE_MAXSIZE=3G" >> $GITHUB_ENV
+          echo "CCACHE_DIR=$HOME/.ccache_${{ env.KSU_TYPE }}_${{ env.KERNEL_VERSION }}" >> $GITHUB_ENV
+          echo "CCACHE_MAXSIZE=10G" >> $GITHUB_ENV
           echo "当前磁盘空间："
           df -h
-          echo "当前构建内核版本：${{ env.KERNEL_VERSION }}"
+          echo "当前构建内核：${{ env.KERNEL_VERSION }}"
 
-      - name: 📥 Restore ccache (载入当前内核版本的ccache缓存)
-        uses: actions/cache@v4
+      - name: 📥 Restore ccache (载入当前机型的ccache缓存)
         id: ccache-restore
+        uses: actions/cache/restore@v4
         with:
           path: ${{ env.CCACHE_DIR }}
-          key: ccache-${{ env.KSU_TYPE }}-${{ env.KERNEL_VERSION }}-${{ runner.os }}-main
+          key: ccache-${{ env.KSU_TYPE }}-${{ env.KERNEL_VERSION }}-latest
           restore-keys: |
-            ccache-${{ env.KSU_TYPE }}-${{ env.KERNEL_VERSION }}-${{ runner.os }}-
             ccache-${{ env.KSU_TYPE }}-${{ env.KERNEL_VERSION }}-
+
+      - name: 🔎 Find public ccache in releases (查找公共缓存)
+        id: public-ccache
+        if: ${{ steps.ccache-restore.outputs.cache-matched-key == '' }}
+        uses: actions/github-script@v7
+        env:
+          PUBLIC_CACHE_REPO: ${{ vars.PUBLIC_CACHE_REPO_LENOVO }}
+          PUBLIC_CACHE_TAG: ${{ vars.PUBLIC_CACHE_TAG_LENOVO }}
+          KERNEL_VERSION_NAME: ${{ env.KERNEL_VERSION }}
+        with:
+          script: |
+            const kernelVersion = process.env.KERNEL_VERSION_NAME;
+            let selected = null;
+
+            const escapeRegex = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            const exactAssetName = `ccache-${kernelVersion}.tar.zst`;
+            const legacyAssetPattern = new RegExp(`^ccache-(.+-)?${escapeRegex(kernelVersion)}(-[0-9]+)?\\.tar\\.zst$`);
+
+            const unique = (values) => [...new Set(values.filter(Boolean))];
+            const candidateRepos = unique([
+              process.env.PUBLIC_CACHE_REPO,
+              'showdo/Build_Lenovo_sm8750',
+              'showdo/Build_Oneplus_Realme_Action',
+            ]);
+            const candidateTags = unique([
+              process.env.PUBLIC_CACHE_TAG,
+              'Public_Ccache',
+              'Public_Ccache_SM8750',
+            ]);
+
+            core.info(`当前仓库无匹配 ccache，开始按内核版本查找公共缓存: ${kernelVersion}`);
+            core.info(`优先匹配公共缓存文件: ${exactAssetName}`);
+
+            for (const repoName of candidateRepos) {
+              const [owner, repo] = repoName.split('/');
+              for (const releaseTag of candidateTags) {
+                core.info(`尝试缓存来源: ${owner}/${repo}@${releaseTag}`);
+
+                let release;
+                try {
+                  const response = await github.rest.repos.getReleaseByTag({
+                    owner,
+                    repo,
+                    tag: releaseTag,
+                  });
+                  release = response.data;
+                } catch (error) {
+                  core.info(`未找到公共缓存 release: ${owner}/${repo}@${releaseTag}`);
+                  continue;
+                }
+
+                for (const asset of release.assets || []) {
+                  const isExactMatch = asset.name === exactAssetName;
+                  const isLegacyMatch = legacyAssetPattern.test(asset.name);
+                  if (isExactMatch || isLegacyMatch) {
+                    const shouldReplace =
+                      !selected ||
+                      (isExactMatch && !selected.exact) ||
+                      (isExactMatch === selected.exact && new Date(asset.updated_at) > new Date(selected.updated_at));
+
+                    if (shouldReplace) {
+                      selected = {
+                        name: asset.name,
+                        updated_at: asset.updated_at,
+                        tag: release.tag_name,
+                        repo: `${owner}/${repo}`,
+                        exact: isExactMatch,
+                      };
+                    }
+                  }
+                }
+
+                if (selected?.exact) {
+                  break;
+                }
+              }
+
+              if (selected?.exact) {
+                break;
+              }
+            }
+
+            if (!selected) {
+              core.info('未找到可用的公共 ccache 资产，将使用空缓存继续构建');
+              return;
+            }
+
+            core.info(`找到公共缓存: ${selected.name} (${selected.repo}@${selected.tag})`);
+            core.setOutput('asset-name', selected.name);
+            core.setOutput('release-tag', selected.tag);
+            core.setOutput('source-repo', selected.repo);
+
+      - name: 📦 Restore public ccache from releases (恢复公共缓存)
+        if: ${{ steps.ccache-restore.outputs.cache-matched-key == '' && steps.public-ccache.outputs.asset-name != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PUBLIC_CACHE_REPO: ${{ steps.public-ccache.outputs.source-repo }}
+          PUBLIC_CACHE_TAG: ${{ steps.public-ccache.outputs.release-tag }}
+          PUBLIC_CACHE_ASSET: ${{ steps.public-ccache.outputs.asset-name }}
+        run: |
+          set -euo pipefail
+          echo "当前仓库无匹配缓存，开始下载公共缓存: $PUBLIC_CACHE_ASSET"
+          rm -f "$PUBLIC_CACHE_ASSET"
+          rm -rf "$CCACHE_DIR"
+          gh release download "$PUBLIC_CACHE_TAG" --repo "$PUBLIC_CACHE_REPO" --pattern "$PUBLIC_CACHE_ASSET" --dir .
+          TEMP_EXTRACT_DIR="$(mktemp -d)"
+          tar --use-compress-program=unzstd -xf "$PUBLIC_CACHE_ASSET" -C "$TEMP_EXTRACT_DIR"
+          EXTRACTED_CCACHE_DIR="$(find "$TEMP_EXTRACT_DIR" -maxdepth 1 -mindepth 1 -type d -name '.ccache_*' | head -n 1)"
+          if [ -z "$EXTRACTED_CCACHE_DIR" ]; then
+            echo "::error::公共缓存解压后未找到 .ccache_* 目录"
+            exit 1
+          fi
+
+          mkdir -p "$CCACHE_DIR"
+          shopt -s dotglob nullglob
+          mv "$EXTRACTED_CCACHE_DIR"/* "$CCACHE_DIR"/
+          shopt -u dotglob nullglob
+          rm -rf "$TEMP_EXTRACT_DIR"
+          test -d "$CCACHE_DIR"
+          ls -lah "$CCACHE_DIR" | head -n 20
+          echo "PUBLIC_CCACHE_USED=true" >> "$GITHUB_ENV"
+          echo "公共缓存恢复完成: $CCACHE_DIR"
       
-      - name: 📥 Init ccache (初始化并配置ccache)
+      - name: 📥 Init ccache (初始化配置ccache)
         run: |
           # 设置ccache环境变量
           export CCACHE_COMPILERCHECK="none"
@@ -199,10 +320,17 @@ jobs:
           ccache -s
           
           # 如果缓存恢复命中，显示详细信息
-          if [ "${{ steps.ccache-restore.outputs.cache-hit }}" == 'true' ]; then
-            echo "ccache缓存命中详情:"
+          if [ -n "${{ steps.ccache-restore.outputs.cache-matched-key }}" ]; then
+            echo "ccache缓存命中详情: ${{ steps.ccache-restore.outputs.cache-matched-key }}"
             ccache -sv
+          elif [ "${PUBLIC_CCACHE_USED:-false}" = 'true' ]; then
+            echo "已恢复公共 ccache，当前缓存详情:"
+            ccache -sv
+          else
+            echo "未命中仓库缓存，也未找到公共缓存，将从空缓存开始构建"
           fi
+
+          
       - name: 🛠 Set Baseband-guard (配置BBG基带守护)
         if: ${{ env.ENABLE_BBG == 'true' }}
         run: |
@@ -352,7 +480,11 @@ jobs:
           ESCAPED_SUFFIX=$(printf '%s\n' "$DEFAULT_SUFFIX" | sed 's:[\/&]:\\&:g')
           sudo sed -i "s/-4k/$ESCAPED_SUFFIX/g" ./common/arch/arm64/configs/gki_defconfig
           sed -i 's/${scm_version}//' ./common/scripts/setlocalversion
-          
+
+      - name: 📥 Start build timer (构建计时开始)
+        run: 
+          echo "BUILD_START=$(date +%s)" >> $GITHUB_ENV
+      
       - name: 🔨 Build Kernel (构建内核)
         run: |
           WORKDIR="$(pwd)"
@@ -438,6 +570,70 @@ jobs:
           echo "编译后空间:"
           df -h
 
+      - name: 🕒 Calculate build time (计算构建时间)
+        run: |
+          END=$(date +%s)
+          TIME=$((END - BUILD_START))
+          echo "BUILD_TIME=$TIME" >> $GITHUB_ENV
+          echo "Build time: $TIME seconds"
+
+      - name: 📥 Save ccache if needed (构建时间较长或首次落地本地缓存时保存)
+        if: ${{ env.BUILD_TIME > 480 || steps.ccache-restore.outputs.cache-matched-key == '' }}
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-${{ env.KSU_TYPE }}-${{ env.KERNEL_VERSION }}-${{ github.run_id }}
+
+      - name: 🧹 Clean old ccache (清理旧缓存)
+        if: env.BUILD_TIME > 480
+        uses: actions/github-script@v7
+        env:
+          PREFIX: ccache-${{ env.KSU_TYPE }}-${{ env.KERNEL_VERSION }}
+          CURRENT_KEY: ccache-${{ env.KSU_TYPE }}-${{ env.KERNEL_VERSION }}-${{ github.run_id }}
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const prefix = process.env.PREFIX;
+            const currentKey = process.env.CURRENT_KEY;
+            let page = 1;
+            let deleted = 0;
+
+            core.info('构建时间超过8分钟，已保存ccache缓存');
+            core.info(`正在清理旧缓存，匹配前缀: ${prefix}`);
+
+            while (true) {
+              const response = await github.rest.actions.getActionsCacheList({
+                owner,
+                repo,
+                per_page: 100,
+                page,
+              });
+
+              const caches = response.data.actions_caches || [];
+              if (caches.length === 0) {
+                break;
+              }
+
+              for (const cache of caches) {
+                if (cache.key.startsWith(prefix) && cache.key !== currentKey) {
+                  core.info(`Deleting cache: ${cache.key} (ID: ${cache.id})`);
+                  await github.rest.actions.deleteActionsCacheById({
+                    owner,
+                    repo,
+                    cache_id: cache.id,
+                  });
+                  deleted++;
+                }
+              }
+
+              if (caches.length < 100) {
+                break;
+              }
+              page++;
+            }
+
+            core.info(`旧缓存清理完成，共删除 ${deleted} 个缓存`);
+          
       - name: 📦 Apply KPM and patch the kernel (应用KPM并修补内核)
         if: ${{ env.ENABLE_KPM == 'true' }}
         run: |
