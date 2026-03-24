@@ -8,6 +8,7 @@ on:
         required: false
         type: choice
         options:
+          - 'TB322FC_1.5.10.117'
           - 'TB322FC_1.5.10.063'
           - 'TB322FC_1.1.11.263'
 
