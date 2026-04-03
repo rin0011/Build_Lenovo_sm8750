@@ -25,26 +25,26 @@ jobs:
       uses: actions/setup-python@v5
       with:
         python-version: '3.x'
-
-    # 步骤 1 & 2: 创建文件夹并下载 KernelSU 相关文件
-    - name: Setup KernelSU Files
+    # 步骤 3: 从 KernelSU 仓库的工作流中获取 ksud 和 android15-6.6-lkm
+    - name: Setup KernelSU Files from KernelSU Repository
       run: |
-        # 1. 创建 Kernelsu 文件夹
         mkdir -p Kernelsu
         
-        # 2. 下载 ksud 和内核模块
-        echo "Downloading KernelSU files..."
-        wget -O Kernelsu/ksud "https://github.com/tiann/KernelSU/releases/latest/download/ksud-x86_64-unknown-linux-musl"
-        wget -O Kernelsu/android15-6.6 "https://github.com/tiann/KernelSU/releases/latest/download/android15-6.6_kernelsu.ko"
+        gh run list --repo tiann/KernelSU --workflow build-manager.yml --limit 1 --json databaseId,conclusion --jq '.[0].databaseId'
         
-        echo "KernelSU files downloaded."
-    # 步骤 3 (已修改): 从 AOSP-Testkey-BootSigner 获取 magiskboot
+        # 下载 ksud
+        gh run download <RUN_ID> --repo tiann/KernelSU --pattern "ksud-x86_64-unknown-linux-musl" -D Kernelsu/
+        
+        # 下载 android15-6.6-lkm
+        gh run download <RUN_ID> --repo tiann/KernelSU --pattern "android15-6.6-lkm" -D Kernelsu/
+        ls -a
+
     - name: Download Magiskboot Tool
       run: |
         echo "Downloading magiskboot from rin0011 tools..."
         # 直接使用 raw.githubusercontent.com 下载 master 分支下的 tools/magiskboot
         # 并将其保存为 magiskboot.so 以匹配后续 Step 5 的参数要求
-        wget -O Kernelsu/magiskboot.so "https://raw.githubusercontent.com/rin0011/AOSP-Testkey-BootSigner/master/tools/magiskboot"
+        wget -O Kernelsu/magiskboot "https://raw.githubusercontent.com/rin0011/AOSP-Testkey-BootSigner/master/tools/magiskboot"
         
         echo "Magiskboot downloaded successfully."
     # 步骤 4: 下载指定 Tag 的镜像文件
@@ -62,14 +62,14 @@ jobs:
       run: |
         echo "Setting permissions..."
         chmod +x Kernelsu/ksud
-        chmod +x Kernelsu/magiskboot.so
+        chmod +x Kernelsu/magiskboot
         
         echo "Running patch..."
         # 注意：这里调用 magiskboot.so，正是我们在步骤 3 下载的文件
         ./Kernelsu/ksud boot-patch \
           -b init_boot.img \
-          --magiskboot Kernelsu/magiskboot.so \
-          --kmi android15-6.6
+          --magiskboot Kernelsu/magiskboot \
+          --kmi android15-6.6-lkm
     # 步骤 6: 处理生成的文件
     - name: Rename Patched Image
       run: |
