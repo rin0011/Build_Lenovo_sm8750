@@ -71,13 +71,19 @@ on:
         type: boolean
 
       disable_pac:
-        description: "关闭PAC指针验证 (提速/调试用)"
+        description: "关闭PAC指针验证 (ARMv8.3)"
+        required: false
+        default: false
+        type: boolean
+
+      disable_bti:
+        description: "关闭BTI分支目标识别 (ARMv8.5)"
         required: false
         default: false
         type: boolean
 
       disable_mte:
-        description: "关闭MTE内存标记 (提速/调试用)"
+        description: "关闭MTE内存标记 (ARMv8.5)"
         required: false
         default: false
         type: boolean
@@ -99,6 +105,7 @@ jobs:
       ENABLE_SUSFS: ${{ github.event.inputs.enable_susfs }}
       ENABLE_SIGNED: ${{ github.event.inputs.enable_signed }}
       DISABLE_PAC: ${{ github.event.inputs.disable_pac }}
+      DISABLE_BTI: ${{ github.event.inputs.disable_bti }}
       DISABLE_MTE: ${{ github.event.inputs.disable_mte }}
     steps:
       - uses: actions/checkout@v5
@@ -489,24 +496,33 @@ jobs:
               ;;
           esac
 
-      - name: 🔧 Disable PAC & MTE (配置PAC和MTE开关)
+      - name: 🔧 Disable PAC, BTI & MTE (配置硬件安全特性开关)
         run: |
           cd kernel_workspace
+          CONFIG_FILE="./common/arch/arm64/configs/gki_defconfig"
+          
           if [ "${{ env.DISABLE_PAC }}" == 'true' ]; then
             echo ">> 正在禁用 PAC (Pointer Authentication)..."
-            sed -i 's/CONFIG_ARM64_PTR_AUTH=y/# CONFIG_ARM64_PTR_AUTH is not set/g' ./common/arch/arm64/configs/gki_defconfig
-            sed -i 's/CONFIG_ARM64_PTR_AUTH_KERNEL=y/# CONFIG_ARM64_PTR_AUTH_KERNEL is not set/g' ./common/arch/arm64/configs/gki_defconfig
-            # 兼容：如果文件中根本没有对应配置项，为了保险起见，我们将设定追加到末尾
-            echo "# CONFIG_ARM64_PTR_AUTH is not set" >> ./common/arch/arm64/configs/gki_defconfig
-            echo "# CONFIG_ARM64_PTR_AUTH_KERNEL is not set" >> ./common/arch/arm64/configs/gki_defconfig
+            sed -i 's/CONFIG_ARM64_PTR_AUTH=y/# CONFIG_ARM64_PTR_AUTH is not set/g' $CONFIG_FILE
+            sed -i 's/CONFIG_ARM64_PTR_AUTH_KERNEL=y/# CONFIG_ARM64_PTR_AUTH_KERNEL is not set/g' $CONFIG_FILE
+            echo "# CONFIG_ARM64_PTR_AUTH is not set" >> $CONFIG_FILE
+            echo "# CONFIG_ARM64_PTR_AUTH_KERNEL is not set" >> $CONFIG_FILE
+          fi
+
+          if [ "${{ env.DISABLE_BTI }}" == 'true' ]; then
+            echo ">> 正在禁用 BTI (Branch Target Identification)..."
+            sed -i 's/CONFIG_ARM64_BTI=y/# CONFIG_ARM64_BTI is not set/g' $CONFIG_FILE
+            sed -i 's/CONFIG_ARM64_BTI_KERNEL=y/# CONFIG_ARM64_BTI_KERNEL is not set/g' $CONFIG_FILE
+            echo "# CONFIG_ARM64_BTI is not set" >> $CONFIG_FILE
+            echo "# CONFIG_ARM64_BTI_KERNEL is not set" >> $CONFIG_FILE
           fi
 
           if [ "${{ env.DISABLE_MTE }}" == 'true' ]; then
             echo ">> 正在禁用 MTE (Memory Tagging Extension)..."
-            sed -i 's/CONFIG_ARM64_MTE=y/# CONFIG_ARM64_MTE is not set/g' ./common/arch/arm64/configs/gki_defconfig
-            sed -i 's/CONFIG_KASAN_HW_TAGS=y/# CONFIG_KASAN_HW_TAGS is not set/g' ./common/arch/arm64/configs/gki_defconfig
-            echo "# CONFIG_ARM64_MTE is not set" >> ./common/arch/arm64/configs/gki_defconfig
-            echo "# CONFIG_KASAN_HW_TAGS is not set" >> ./common/arch/arm64/configs/gki_defconfig
+            sed -i 's/CONFIG_ARM64_MTE=y/# CONFIG_ARM64_MTE is not set/g' $CONFIG_FILE
+            sed -i 's/CONFIG_KASAN_HW_TAGS=y/# CONFIG_KASAN_HW_TAGS is not set/g' $CONFIG_FILE
+            echo "# CONFIG_ARM64_MTE is not set" >> $CONFIG_FILE
+            echo "# CONFIG_KASAN_HW_TAGS is not set" >> $CONFIG_FILE
           fi
 
       - name: 🔧 Set gki_defconfig (设置编译配置) 
