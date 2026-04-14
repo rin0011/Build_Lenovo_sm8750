@@ -70,8 +70,18 @@ on:
         default: true
         type: boolean
 
-      
-       
+      disable_pac:
+        description: "关闭PAC指针验证 (提速/调试用)"
+        required: false
+        default: false
+        type: boolean
+
+      disable_mte:
+        description: "关闭MTE内存标记 (提速/调试用)"
+        required: false
+        default: false
+        type: boolean
+
 jobs:
   build:
     name: Build_${{ github.event.inputs.kernel_version }}
@@ -88,6 +98,8 @@ jobs:
       ENABLE_KPM: ${{ github.event.inputs.enable_kpm }}
       ENABLE_SUSFS: ${{ github.event.inputs.enable_susfs }}
       ENABLE_SIGNED: ${{ github.event.inputs.enable_signed }}
+      DISABLE_PAC: ${{ github.event.inputs.disable_pac }}
+      DISABLE_MTE: ${{ github.event.inputs.disable_mte }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -477,6 +489,26 @@ jobs:
               ;;
           esac
 
+      - name: 🔧 Disable PAC & MTE (配置PAC和MTE开关)
+        run: |
+          cd kernel_workspace
+          if [ "${{ env.DISABLE_PAC }}" == 'true' ]; then
+            echo ">> 正在禁用 PAC (Pointer Authentication)..."
+            sed -i 's/CONFIG_ARM64_PTR_AUTH=y/# CONFIG_ARM64_PTR_AUTH is not set/g' ./common/arch/arm64/configs/gki_defconfig
+            sed -i 's/CONFIG_ARM64_PTR_AUTH_KERNEL=y/# CONFIG_ARM64_PTR_AUTH_KERNEL is not set/g' ./common/arch/arm64/configs/gki_defconfig
+            # 兼容：如果文件中根本没有对应配置项，为了保险起见，我们将设定追加到末尾
+            echo "# CONFIG_ARM64_PTR_AUTH is not set" >> ./common/arch/arm64/configs/gki_defconfig
+            echo "# CONFIG_ARM64_PTR_AUTH_KERNEL is not set" >> ./common/arch/arm64/configs/gki_defconfig
+          fi
+
+          if [ "${{ env.DISABLE_MTE }}" == 'true' ]; then
+            echo ">> 正在禁用 MTE (Memory Tagging Extension)..."
+            sed -i 's/CONFIG_ARM64_MTE=y/# CONFIG_ARM64_MTE is not set/g' ./common/arch/arm64/configs/gki_defconfig
+            sed -i 's/CONFIG_KASAN_HW_TAGS=y/# CONFIG_KASAN_HW_TAGS is not set/g' ./common/arch/arm64/configs/gki_defconfig
+            echo "# CONFIG_ARM64_MTE is not set" >> ./common/arch/arm64/configs/gki_defconfig
+            echo "# CONFIG_KASAN_HW_TAGS is not set" >> ./common/arch/arm64/configs/gki_defconfig
+          fi
+
       - name: 🔧 Set gki_defconfig (设置编译配置) 
         run: |
           cd kernel_workspace
@@ -788,4 +820,3 @@ jobs:
         with:
           name: Re-Kernel-v${{ steps.download-rekernel.outputs.tag-name }}-6.6
           path: kernel_workspace/Re-Kernel-v${{ steps.download-rekernel.outputs.tag-name }}-6.6
-          
